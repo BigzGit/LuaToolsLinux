@@ -702,7 +702,9 @@ def _copy_webkit_files() -> None:
 
 
 def _inject_webkit_files() -> None:
-    js_path = os.path.join(WEBKIT_DIR_NAME, WEB_UI_JS_FILE)
+    # Millennium 3 resolves loose-file hooks relative to its themes root.
+    # Register the copied file by its absolute path on Linux.
+    js_path = os.path.join(_steam_ui_path(), WEB_UI_JS_FILE)
     Millennium.add_browser_js(js_path)
     logger.log(f"LuaTools injected web UI: {js_path}")
 
