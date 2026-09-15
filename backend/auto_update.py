@@ -10,7 +10,12 @@ import threading
 import time
 import sys
 import zipfile
+import hashlib
+import tempfile
+import re
 from typing import Any, Dict, Optional
+
+from security import extract_zip, validate_zip
 
 from api_manifest import store_last_message
 from config import (
@@ -44,7 +49,7 @@ def apply_pending_update_if_any() -> str:
     try:
         logger.log(f"AutoUpdate: Applying pending update from {pending_zip}")
         with zipfile.ZipFile(pending_zip, "r") as archive:
-            archive.extractall(get_plugin_dir())
+            extract_zip(archive, get_plugin_dir())
         try:
             os.remove(pending_zip)
         except Exception:
@@ -112,6 +117,7 @@ def _fetch_github_latest(cfg: Dict[str, Any]) -> Dict[str, Any]:
         version = version[len(tag_prefix) :]
 
     zip_url = ""
+    digest = ""
 
     try:
         assets = data.get("assets", [])
@@ -120,6 +126,7 @@ def _fetch_github_latest(cfg: Dict[str, Any]) -> Dict[str, Any]:
                 a_name = str(asset.get("name", "")).strip()
                 if a_name == asset_name:
                     zip_url = str(asset.get("browser_download_url", "")).strip()
+                    digest = str(asset.get("digest") or "")
                     break
     except Exception:
         pass
@@ -128,23 +135,39 @@ def _fetch_github_latest(cfg: Dict[str, Any]) -> Dict[str, Any]:
         logger.warn("AutoUpdate: No download URL found")
         return {}
 
-    return {"version": version, "zip_url": zip_url}
+    return {"version": version, "zip_url": zip_url, "sha256": digest.removeprefix("sha256:")}
 
 
-def _download_and_extract_update(zip_url: str, pending_zip: str) -> bool:
+def _download_and_extract_update(zip_url: str, pending_zip: str, sha256: str = "") -> bool:
     client = ensure_http_client("AutoUpdate: download")
+    temp_path = None
     try:
+        if sha256 and not re.fullmatch(r"[0-9a-fA-F]{64}", sha256):
+            raise ValueError("Invalid update digest")
+        digest = hashlib.sha256()
         logger.log(f"AutoUpdate: Downloading {zip_url} -> {pending_zip}")
         with client.stream("GET", zip_url, follow_redirects=True) as response:
             response.raise_for_status()
-            with open(pending_zip, "wb") as output:
+            fd, temp_path = tempfile.mkstemp(prefix=".update-", dir=os.path.dirname(pending_zip))
+            with os.fdopen(fd, "wb") as output:
                 for chunk in response.iter_bytes():
                     if chunk:
                         output.write(chunk)
+                        digest.update(chunk)
+        if sha256 and digest.hexdigest() != sha256.lower():
+            raise ValueError("Update digest mismatch")
+        with zipfile.ZipFile(temp_path) as archive:
+            validate_zip(archive)
+            if archive.testzip() is not None:
+                raise ValueError("Corrupt update archive")
+        os.replace(temp_path, pending_zip)
         return True
     except Exception as exc:
         logger.warn(f"AutoUpdate: Failed to download update: {exc}")
         return False
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
 
 
 def check_for_update_once() -> str:
@@ -191,13 +214,13 @@ def check_for_update_once() -> str:
     pending_zip = backend_path(UPDATE_PENDING_ZIP)
     pending_info = backend_path(UPDATE_PENDING_INFO)
 
-    if not _download_and_extract_update(zip_url, pending_zip):
+    if not _download_and_extract_update(zip_url, pending_zip, str(manifest.get("sha256") or "")):
         return ""
 
     # Attempt to extract immediately
     try:
         with zipfile.ZipFile(pending_zip, "r") as archive:
-            archive.extractall(get_plugin_dir())
+            extract_zip(archive, get_plugin_dir())
         try:
             os.remove(pending_zip)
         except Exception:
@@ -241,14 +264,9 @@ def _start_periodic_update_checks():
 def _check_and_donate_keys() -> None:
     """Check donateKeys setting and send keys if enabled."""
     try:
-        from donate_keys import extract_valid_decryption_keys, send_donation_keys
-        from settings.manager import _get_values_locked
+        from donate_keys import donation_enabled, extract_valid_decryption_keys, send_donation_keys
 
-        values = _get_values_locked()
-        general = values.get("general", {})
-        donate_keys_enabled = general.get("donateKeys", False)
-
-        if not donate_keys_enabled:
+        if not donation_enabled():
             return
 
         steam_path = detect_steam_install_path()
@@ -323,15 +341,15 @@ def restart_steam_internal() -> bool:
                 "steam",
             ]
             launcher_candidates = [candidate for candidate in launcher_candidates if candidate]
-            steam_cmd = "steam"
+            steam_cmd = ["steam"]
 
             for candidate in launcher_candidates:
                 if candidate.startswith("flatpak run "):
-                    steam_cmd = candidate
+                    steam_cmd = ["flatpak", "run", "com.valvesoftware.Steam"]
                     logger.log(f"LuaTools: Found Steam launcher at {steam_cmd}")
                     break
                 if os.path.exists(candidate):
-                    steam_cmd = candidate
+                    steam_cmd = [candidate]
                     logger.log(f"LuaTools: Found Steam launcher at {steam_cmd}")
                     break
             else:
@@ -342,10 +360,10 @@ def restart_steam_internal() -> bool:
             # 2. pkill -9: Mata a steam (e este processo)
             # 3. sleep 10: Garante que a Steam morreu
             # 4. nohup ... &: Inicia a nova steam desatrelada do terminal morto
-            full_command = f"sleep 1; pkill -9 steam; sleep 10; nohup {steam_cmd} > /dev/null 2>&1 &"
+            full_command = 'sleep 1; pkill -9 steam; sleep 10; nohup "$@" > /dev/null 2>&1 &'
 
             subprocess.Popen(
-                ["sh", "-c", full_command],
+                ["sh", "-c", full_command, "luatools-restart", *steam_cmd],
                 start_new_session=True, # Cria nova sessão (setsid)
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL

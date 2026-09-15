@@ -9,16 +9,44 @@ import zipfile
 from datetime import datetime
 from typing import Dict, Optional
 
+from security import (
+    extract_zip,
+    rooted_path,
+    remove_rooted_file,
+    atomic_output,
+    game_install_path,
+    is_allowed_game_install_path,
+    validate_remote_url,
+)
+
 from downloads import fetch_app_name
 from http_client import ensure_http_client
 from logger import logger
 from utils import ensure_temp_download_dir
-from steam_utils import get_game_install_path_response
+from steam_utils import get_game_install_path_response, get_steam_library_paths
 
 FIX_DOWNLOAD_STATE: Dict[int, Dict[str, any]] = {}
 FIX_DOWNLOAD_LOCK = threading.Lock()
 UNFIX_STATE: Dict[int, Dict[str, any]] = {}
 UNFIX_LOCK = threading.Lock()
+
+
+def _allowed_download_hosts():
+    """Optional operator allowlist for fix download hosts."""
+    raw = os.environ.get("LUATOOLS_ALLOWED_DOWNLOAD_HOSTS", "")
+    hosts = [part.strip() for part in raw.split(",") if part.strip()]
+    return hosts or None
+
+
+def _assert_allowed_install_path(install_path: str) -> None:
+    """Reject install paths outside the configured Steam libraries.
+
+    When no Steam library can be detected the historical behaviour is kept so
+    that custom/standalone layouts keep working.
+    """
+    libraries = get_steam_library_paths()
+    if libraries and not is_allowed_game_install_path(install_path, libraries):
+        raise ValueError("Install path is not inside a configured Steam library")
 
 
 def _set_fix_download_state(appid: int, update: dict) -> None:
@@ -107,7 +135,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
             total = int(resp.headers.get("Content-Length", "0") or "0")
             _set_fix_download_state(appid, {"totalBytes": total})
 
-            with open(dest_zip, "wb") as output:
+            with atomic_output(dest_zip) as output:
                 for chunk in resp.iter_bytes():
                     if not chunk:
                         continue
@@ -139,34 +167,11 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                 logger.log(f"LuaTools: Fix extraction cancelled before start for {appid}")
                 raise RuntimeError("cancelled")
 
-            if len(top_level_entries) == 1 and appid_folder.rstrip("/") in top_level_entries:
-                logger.log(f"LuaTools: Found single folder {appid} in zip, extracting its contents")
-                for member in archive.namelist():
-                    if member.startswith(appid_folder) and member != appid_folder:
-                        target_path = member[len(appid_folder):]
-                        if not target_path:
-                            continue
-                        source = archive.open(member)
-                        target = os.path.join(install_path, target_path)
-                        os.makedirs(os.path.dirname(target), exist_ok=True)
-                        if not member.endswith("/"):
-                            with open(target, "wb") as output:
-                                output.write(source.read())
-                            extracted_files.append(target_path.replace("\\", "/"))
-                        source.close()
-                        if _get_fix_download_state(appid).get("status") == "cancelled":
-                            logger.log(f"LuaTools: Fix extraction cancelled mid-process for {appid}")
-                            raise RuntimeError("cancelled")
-            else:
-                logger.log(f"LuaTools: Extracting all zip contents to {install_path}")
-                for member in archive.namelist():
-                    if member.endswith("/"):
-                        continue
-                    archive.extract(member, install_path)
-                    extracted_files.append(member.replace("\\", "/"))
-                    if _get_fix_download_state(appid).get("status") == "cancelled":
-                        logger.log(f"LuaTools: Fix extraction cancelled mid-process for {appid}")
-                        raise RuntimeError("cancelled")
+            prefix = appid_folder if len(top_level_entries) == 1 and appid_folder.rstrip('/') in top_level_entries else ''
+            extracted_files = extract_zip(
+                archive, install_path, prefix=prefix,
+                cancelled=lambda: _get_fix_download_state(appid).get('status') == 'cancelled',
+            )
 
         if _get_fix_download_state(appid).get("status") == "cancelled":
             logger.log(f"LuaTools: Fix cancelled after extraction for {appid}")
@@ -187,7 +192,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                             contents = ini_file.read()
                         updated_contents = contents.replace("<appid>", str(appid))
                         if updated_contents != contents:
-                            with open(ini_full_path, "w", encoding="utf-8") as ini_file:
+                            with atomic_output(ini_full_path, "w", permissions=0o644) as ini_file:
                                 ini_file.write(updated_contents)
                             logger.log(f"LuaTools: Updated unsteam.ini with appid {appid}")
                         else:
@@ -199,7 +204,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
             except Exception as exc:
                 logger.warn(f"LuaTools: Failed to update unsteam.ini: {exc}")
 
-        log_file_path = os.path.join(install_path, f"luatools-fix-log-{appid}.log")
+        log_file_path = rooted_path(install_path, f"luatools-fix-log-{appid}.log")
         try:
             # Read existing log to preserve previous fixes
             existing_content = ""
@@ -211,7 +216,7 @@ def _download_and_extract_fix(appid: int, download_url: str, install_path: str, 
                     pass
 
             # Append new fix entry
-            with open(log_file_path, "w", encoding="utf-8") as log_file:
+            with atomic_output(log_file_path, "w", permissions=0o644) as log_file:
                 # Write existing content first
                 if existing_content:
                     log_file.write(existing_content)
@@ -264,8 +269,20 @@ def apply_game_fix(appid: int, download_url: str, install_path: str, fix_type: s
     if not download_url or not install_path:
         return json.dumps({"success": False, "error": "Missing download URL or install path"})
 
+    try:
+        download_url = validate_remote_url(download_url, allowed_hosts=_allowed_download_hosts())
+    except ValueError as exc:
+        logger.warn(f"LuaTools: Rejected fix download URL: {exc}")
+        return json.dumps({"success": False, "error": "Invalid or insecure download URL"})
+
     if not os.path.exists(install_path):
         return json.dumps({"success": False, "error": "Install path does not exist"})
+
+    try:
+        _assert_allowed_install_path(install_path)
+    except ValueError as exc:
+        logger.warn(f"LuaTools: Rejected fix install path for appid={appid}: {exc}")
+        return json.dumps({"success": False, "error": "Install path is not allowed"})
 
     logger.log(f"LuaTools: ApplyGameFix appid={appid}, fixType={fix_type}")
 
@@ -306,7 +323,7 @@ def cancel_apply_fix(appid: int) -> str:
 def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
     try:
         logger.log(f"LuaTools: Starting un-fix for appid {appid}, fix_date={fix_date}")
-        log_file_path = os.path.join(install_path, f"luatools-fix-log-{appid}.log")
+        log_file_path = rooted_path(install_path, f"luatools-fix-log-{appid}.log")
 
         if not os.path.exists(log_file_path):
             _set_unfix_state(appid, {"status": "failed", "error": "No fix log found. Cannot un-fix."})
@@ -372,12 +389,15 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
             return
 
         _set_unfix_state(appid, {"status": "removing", "progress": f"Removing {len(files_to_delete)} files..."})
+        # Validate the entire removal plan before deleting any files.
+        for file_path in files_to_delete:
+            rooted_path(install_path, file_path)
         deleted_count = 0
         for file_path in files_to_delete:
             try:
-                full_path = os.path.join(install_path, file_path)
+                full_path = rooted_path(install_path, file_path)
                 if os.path.exists(full_path):
-                    os.remove(full_path)
+                    remove_rooted_file(install_path, file_path)
                     deleted_count += 1
                     logger.log(f"LuaTools: Deleted {file_path}")
             except Exception as exc:
@@ -389,7 +409,7 @@ def _unfix_game_worker(appid: int, install_path: str, fix_date: str = None):
         if remaining_fixes:
             # We deleted a specific fix, update the log with remaining fixes
             try:
-                with open(log_file_path, "w", encoding="utf-8") as handle:
+                with atomic_output(log_file_path, "w", permissions=0o644) as handle:
                     handle.write("\n\n---\n\n".join(remaining_fixes))
                 logger.log(f"LuaTools: Updated log file, {len(remaining_fixes)} fixes remaining")
             except Exception as exc:
@@ -427,6 +447,12 @@ def unfix_game(appid: int, install_path: str = "", fix_date: str = "") -> str:
 
     if not os.path.exists(resolved_path):
         return json.dumps({"success": False, "error": "Install path does not exist"})
+
+    try:
+        _assert_allowed_install_path(resolved_path)
+    except ValueError as exc:
+        logger.warn(f"LuaTools: Rejected unfix install path for appid={appid}: {exc}")
+        return json.dumps({"success": False, "error": "Install path is not allowed"})
 
     logger.log(f"LuaTools: UnFixGame appid={appid}, path={resolved_path}, fix_date={fix_date}")
 
@@ -511,7 +537,7 @@ def get_installed_fixes() -> str:
                         if not install_dir:
                             continue
 
-                        full_install_path = os.path.join(lib_path, "steamapps", "common", install_dir)
+                        full_install_path = game_install_path(lib_path, install_dir)
                         if not os.path.exists(full_install_path):
                             continue
 
@@ -636,6 +662,12 @@ def apply_linux_native_fix(install_path: str) -> str:
         return json.dumps({"success": False, "error": "Game path not found."})
 
     try:
+        _assert_allowed_install_path(install_path)
+    except ValueError as exc:
+        logger.warn(f"LuaTools: Rejected native fix path: {exc}")
+        return json.dumps({"success": False, "error": "Install path is not allowed"})
+
+    try:
         count = 0
         # Permissions rwxr-xr-x (755) - Owner reads/writes/executes, others read/execute
         EXEC_MASK = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
@@ -645,9 +677,14 @@ def apply_linux_native_fix(install_path: str) -> str:
                 file_path = os.path.join(root, name)
                 try:
                     # Get current stats
-                    st = os.stat(file_path)
-                    # Add execution bit
-                    os.chmod(file_path, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    fd = os.open(file_path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    try:
+                        st = os.fstat(fd)
+                        if not stat.S_ISREG(st.st_mode):
+                            continue
+                        os.fchmod(fd, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    finally:
+                        os.close(fd)
                     count += 1
                 except Exception:
                     pass # Skip files we can't modify

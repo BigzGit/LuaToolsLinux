@@ -11,6 +11,9 @@ import time
 import subprocess
 from typing import Dict, Any
 
+from security import trusted_ryuu_url, atomic_write_text, atomic_output, validate_zip
+from urllib.parse import quote
+
 from platform_bridge import Millennium
 
 from api_manifest import load_api_manifest
@@ -65,6 +68,98 @@ def _get_api_json_path() -> str:
     """Retorna o caminho do arquivo api.json."""
     return os.path.join(os.path.dirname(__file__), "api.json")
 
+MORRENUS_KEY_PLACEHOLDER = "<moapikey>"
+
+
+def _get_morrenus_key_path() -> str:
+    """Caminho do arquivo privado onde a chave Morrenus fica guardada."""
+    return os.path.join(os.path.dirname(__file__), "data", "morrenus_key.txt")
+
+
+def _ensure_private_dir(path: str) -> None:
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    try:
+        os.chmod(directory, 0o700)
+    except OSError:
+        pass
+
+
+def save_morrenus_key(key: str) -> None:
+    """Persist the Morrenus credential separately from api.json (mode 0600)."""
+    key = key.strip()
+    if not key:
+        raise ValueError("empty key")
+    path = _get_morrenus_key_path()
+    _ensure_private_dir(path)
+    atomic_write_text(path, key)
+
+
+def _migrate_legacy_morrenus_key() -> str:
+    """Extract a key embedded in api.json, store it privately and strip the URL."""
+    from urllib.parse import parse_qs, urlsplit, urlunsplit
+
+    path = _get_api_json_path()
+    if not os.path.exists(path):
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            root_data = json.load(f)
+    except Exception:
+        return ""
+    if not isinstance(root_data, dict):
+        return ""
+
+    api_list = root_data.get("api_list")
+    if not isinstance(api_list, list):
+        return ""
+
+    key = ""
+    changed = False
+    for api in api_list:
+        if not isinstance(api, dict):
+            continue
+        url = str(api.get("url", ""))
+        if "api_key=" not in url or MORRENUS_KEY_PLACEHOLDER in url:
+            continue
+        parts = urlsplit(url)
+        value = parse_qs(parts.query).get("api_key", [""])[0]
+        if not value:
+            continue
+        key = value
+        api["url"] = urlunsplit(
+            (parts.scheme, parts.netloc, parts.path,
+             "api_key=" + MORRENUS_KEY_PLACEHOLDER, parts.fragment)
+        )
+        changed = True
+
+    if key:
+        try:
+            save_morrenus_key(key)
+        except Exception as exc:
+            logger.warn(f"LuaTools: Failed to migrate Morrenus key: {exc}")
+        if changed:
+            try:
+                atomic_write_text(path, json.dumps(root_data, indent=4))
+                logger.log("LuaTools: Migrated Morrenus key out of api.json")
+            except Exception as exc:
+                logger.warn(f"LuaTools: Failed to rewrite api.json during migration: {exc}")
+    return key
+
+
+def load_morrenus_key() -> str:
+    """Return the stored Morrenus key, migrating a legacy embedded key if needed."""
+    path = _get_morrenus_key_path()
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                value = f.read().strip()
+            if value:
+                return value
+    except Exception as exc:
+        logger.warn(f"LuaTools: Failed to read Morrenus key file: {exc}")
+    return _migrate_legacy_morrenus_key()
+
 def load_ryu_cookie() -> str:
     """Lê o cookie do arquivo. Se não existir, retorna vazio."""
     try:
@@ -81,7 +176,13 @@ def save_ryu_cookie(cookie_content: str) -> str:
     try:
         path = _get_cookie_path()
         # Garante que a pasta data existe
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        data_dir = os.path.dirname(path)
+        os.makedirs(data_dir, exist_ok=True)
+        try:
+            # Secrets live in a private directory, not just a private file.
+            os.chmod(data_dir, 0o700)
+        except OSError:
+            pass
 
         clean_cookie = cookie_content.strip()
 
@@ -89,8 +190,7 @@ def save_ryu_cookie(cookie_content: str) -> str:
         if clean_cookie and not clean_cookie.startswith("session="):
             clean_cookie = f"session={clean_cookie}"
 
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(clean_cookie)
+        atomic_write_text(path, clean_cookie)
 
         logger.log(f"LuaTools: Cookie do Ryuu salvo com sucesso (Tamanho: {len(clean_cookie)})")
         return json.dumps({"success": True, "message": "Cookie salvo e formatado com sucesso!"})
@@ -99,13 +199,16 @@ def save_ryu_cookie(cookie_content: str) -> str:
         return json.dumps({"success": False, "error": str(e)})
 
 def update_morrenus_key(key_content: str) -> str:
-    """Atualiza especificamente a chave da API Morrenus no api.json."""
+    """Atualiza especificamente a chave da API Morrenus (guardada fora do api.json)."""
     try:
         path = _get_api_json_path()
         key_content = key_content.strip()
 
         if not key_content:
             return json.dumps({"success": False, "error": "A chave não pode estar vazia."})
+
+        # A credencial é guardada num ficheiro privado; o api.json só mantém o template.
+        save_morrenus_key(key_content)
 
         root_data = {"api_list": []}
 
@@ -124,8 +227,8 @@ def update_morrenus_key(key_content: str) -> str:
         api_list = root_data["api_list"]
         found = False
 
-        # Template da URL do Morrenus
-        new_url = f"https://manifest.morrenus.xyz/api/v1/manifest/<appid>?api_key={key_content}"
+        # Template da URL do Morrenus (sem a chave em claro)
+        new_url = "https://manifest.morrenus.xyz/api/v1/manifest/<appid>?api_key=" + MORRENUS_KEY_PLACEHOLDER
 
         for api in api_list:
             # Identifica a API do Morrenus pelo nome ou URL antiga
@@ -148,8 +251,7 @@ def update_morrenus_key(key_content: str) -> str:
 
         root_data["api_list"] = api_list
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(root_data, f, indent=4)
+        atomic_write_text(path, json.dumps(root_data, indent=4))
 
         return json.dumps({"success": True, "message": "Chave do Morrenus atualizada com sucesso!"})
 
@@ -499,6 +601,10 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
     target_dir = os.path.join(base_path or "", "config", "stplug-in")
     os.makedirs(target_dir, exist_ok=True)
 
+    # Reject hostile archive names before handing the file to an external launcher.
+    with zipfile.ZipFile(zip_path) as archive:
+        validate_zip(archive)
+
     # --- INTEGRAÇÃO LAUNCHER CUSTOMIZÁVEL ---
     # Carrega o caminho salvo ou usa o padrão
     launcher_bin = load_launcher_path()
@@ -556,7 +662,7 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
                         pure = os.path.basename(name)
                         data = archive.read(name)
                         out_path = os.path.join(depotcache_dir, pure)
-                        with open(out_path, "wb") as manifest_file:
+                        with atomic_output(out_path, permissions=0o644) as manifest_file:
                             manifest_file.write(data)
                         logger.log(f"LuaTools: Extracted manifest -> {out_path}")
                 except Exception as manifest_exc:
@@ -601,7 +707,7 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
         dest_file = os.path.join(target_dir, f"{appid}.lua")
         if _is_download_cancelled(appid):
             raise RuntimeError("cancelled")
-        with open(dest_file, "w", encoding="utf-8") as output:
+        with atomic_output(dest_file, "w", permissions=0o644) as output:
             output.write(processed_text)
         logger.log(f"LuaTools: Installed lua -> {dest_file}")
         _set_download_state(appid, {"installedPath": dest_file})
@@ -649,6 +755,14 @@ def _download_zip_for_app(appid: int):
         success_code = int(api.get("success_code", 200))
         unavailable_code = int(api.get("unavailable_code", 404))
         url = template.replace("<appid>", str(appid))
+        if MORRENUS_KEY_PLACEHOLDER in url:
+            morrenus_key = load_morrenus_key()
+            if not morrenus_key:
+                logger.warn(
+                    f"LuaTools: Provider '{name}' needs a Morrenus key but none is configured; skipping"
+                )
+                continue
+            url = url.replace(MORRENUS_KEY_PLACEHOLDER, quote(morrenus_key, safe=""))
         _set_download_state(
             appid, {"status": "checking", "currentApi": name, "bytesRead": 0, "totalBytes": 0}
         )
@@ -658,7 +772,7 @@ def _download_zip_for_app(appid: int):
             headers = {"User-Agent": USER_AGENT}
 
             # --- LÓGICA DO FORCED RYU (COOKIE) ---
-            if "ryuu.lol" in url:
+            if trusted_ryuu_url(url):
                 cookie_content = load_ryu_cookie()
                 if cookie_content:
                     logger.log(f"LuaTools: Injetando cookie do Ryuu para a API '{name}'")
@@ -686,14 +800,14 @@ def _download_zip_for_app(appid: int):
                 if code == unavailable_code:
                     continue
                 if code != success_code:
-                    if "ryuu.lol" in url and (code == 403 or code == 401):
+                    if trusted_ryuu_url(url) and (code == 403 or code == 401):
                         logger.warn(f"LuaTools: Acesso negado no Ryuu ({code}). Verifique se o cookie expirou.")
                     continue
 
                 total = int(resp.headers.get("Content-Length", "0") or "0")
                 _set_download_state(appid, {"status": "downloading", "bytesRead": 0, "totalBytes": total})
 
-                with open(dest_path, "wb") as output:
+                with atomic_output(dest_path) as output:
                     for chunk in resp.iter_bytes():
                         if not chunk:
                             continue

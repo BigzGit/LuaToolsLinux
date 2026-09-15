@@ -18,7 +18,7 @@ from .options import (
     merge_defaults_with_values,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SETTINGS_FILE = backend_path(os.path.join("data", "settings.json"))
 
 _SETTINGS_LOCK = threading.Lock()
@@ -124,6 +124,16 @@ def _inject_locale_choices(schema: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             continue
         options = group.get("options") or []
         for option in options:
+            if option.get("key") == "donateKeys":
+                from donate_keys import get_donation_url
+                from urllib.parse import urlsplit, urlunsplit
+                recipient = get_donation_url()
+                if recipient:
+                    parts = urlsplit(recipient)
+                    recipient = urlunsplit((parts.scheme, parts.netloc, parts.path, '', ''))
+                    option['description'] += f' Recipient: {recipient}'
+                else:
+                    option['description'] += ' No HTTPS recipient configured; sending is blocked.'
             if option.get("key") == "language":
                 option["choices"] = locale_choices
                 metadata = option.get("metadata") or {}
@@ -185,6 +195,12 @@ _OPTION_LOOKUP = _build_option_lookup()
 
 def _validate_option_value(option: SettingOption, value: Any) -> Tuple[bool, Any, str | None]:
     if option.option_type == "toggle":
+        if option.key == 'donateKeys' and (value is True or (
+            isinstance(value, str) and value.strip().lower() in {'true', '1', 'yes', 'y'}
+        )):
+            from donate_keys import get_donation_url
+            if not get_donation_url():
+                return False, False, 'Configure a trusted HTTPS donation recipient before opting in'
         if isinstance(value, bool):
             return True, value, None
         if isinstance(value, str):
@@ -265,10 +281,17 @@ def _load_settings_cache() -> Dict[str, Any]:
         return _SETTINGS_CACHE
 
     raw_data = _load_settings_file()
+    if not isinstance(raw_data, dict):
+        raw_data = {}
     version = raw_data.get("version", 0)
     values = raw_data.get("values")
 
     merged_values = merge_defaults_with_values(values)
+    # Old defaults enabled donation without consent. Require a fresh opt-in.
+    if type(version) is not int or version < 2:
+        merged_values['general']['donateKeys'] = False
+    elif merged_values['general'].get('donateKeys') is not True:
+        merged_values['general']['donateKeys'] = False
     if version != SCHEMA_VERSION or merged_values != values:
         _write_settings_file({"version": SCHEMA_VERSION, "values": merged_values})
     _SETTINGS_CACHE = merged_values

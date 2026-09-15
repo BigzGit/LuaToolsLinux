@@ -31,6 +31,68 @@ debug() { $DEBUG && echo -e "${CYAN}[DEBUG]${NC} $*"; }
 
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
 
+# SHA-256 pins for third-party installer scripts (see dependencies.lock.json).
+LUATOOLS_LOCK_FILE=""
+
+lookup_remote_hash() {
+    [[ -n "$LUATOOLS_LOCK_FILE" && -f "$LUATOOLS_LOCK_FILE" ]] || { printf '%s' ""; return 0; }
+    python3 - "$LUATOOLS_LOCK_FILE" "$1" <<'PYLOCK'
+import json
+import sys
+try:
+    with open(sys.argv[1], 'r', encoding='utf-8') as handle:
+        data = json.load(handle)
+    entry = (data.get('resources') or {}).get(sys.argv[2]) or {}
+    print(entry.get('sha256', ''))
+except Exception:
+    print('')
+PYLOCK
+}
+
+verify_sha256() {
+    local actual
+    actual="$(sha256sum "$1" | awk '{print $1}')"
+    [[ -n "$2" && "$actual" == "$2" ]]
+}
+
+# Download a resource and require its pinned SHA-256 before it is used.
+download_verified() {
+    local url="$1" dest="$2" expected
+    curl --proto '=https' --proto-redir '=https' -fsSL "$url" -o "$dest" || return 1
+    expected="$(lookup_remote_hash "$url")"
+    if [[ -z "$expected" ]]; then
+        rm -f -- "$dest"
+        fail "No pinned SHA-256 for ${url}; refusing to use an unpinned download"
+    fi
+    if ! verify_sha256 "$dest" "$expected"; then
+        rm -f -- "$dest"
+        fail "SHA-256 mismatch for ${url}; refusing to continue"
+    fi
+}
+
+# Download then execute a remote installer, verifying its pinned SHA-256 first.
+run_remote_script() {
+    local url="$1"; shift
+    local script expected rc=0
+    script="$(mktemp)" || return 1
+    if ! curl --proto '=https' --proto-redir '=https' -fsSL "$url" -o "$script"; then
+        rm -f -- "$script"
+        return 1
+    fi
+    expected="$(lookup_remote_hash "$url")"
+    if [[ -z "$expected" ]]; then
+        rm -f -- "$script"
+        fail "No pinned SHA-256 for ${url}; refusing to execute an unpinned remote script"
+    fi
+    if ! verify_sha256 "$script" "$expected"; then
+        rm -f -- "$script"
+        fail "SHA-256 mismatch for ${url}; refusing to execute"
+    fi
+    bash "$script" "$@" || rc=$?
+    rm -f -- "$script"
+    return "$rc"
+}
+
 # ---------- Read-only mode control for immutable systems ----------
 IMMUTABLE_DISABLED=false
 
@@ -92,7 +154,29 @@ reenable_readonly() {
 }
 
 # Ensure read-only is re-enabled on script exit (even on error)
-trap reenable_readonly EXIT
+LUATOOLS_RELEASE_TMP=""
+LUATOOLS_INSTALL_DIR=""
+cleanup_install() {
+    if [[ -n "$LUATOOLS_RELEASE_TMP" ]]; then
+        rm -rf -- "$LUATOOLS_RELEASE_TMP"
+    fi
+    if [[ -n "$LUATOOLS_LOCK_FILE" ]]; then
+        rm -f -- "$LUATOOLS_LOCK_FILE"
+    fi
+    reenable_readonly
+}
+trap cleanup_install EXIT
+
+# Fetch the SHA-256 pin list used to verify remote installer scripts.
+load_dependency_lock() {
+    local lock_tmp
+    lock_tmp="$(mktemp)" || return 0
+    if curl --proto '=https' --proto-redir '=https' -fsSL "$SELF_REPO_BASE/dependencies.lock.json" -o "$lock_tmp" 2>/dev/null; then
+        LUATOOLS_LOCK_FILE="$lock_tmp"
+    else
+        rm -f -- "$lock_tmp"
+    fi
+}
 
 # ---------- Install jq if missing ----------
 ensure_jq() {
@@ -146,38 +230,42 @@ prepare_steamos() {
 
 # ---------- Extract zip ----------
 extract_zip() {
-    local archive_path="$1"
-    local destination="$2"
-    mkdir -p "$destination"
-    if command -v unzip &>/dev/null; then
-        unzip -qo "$archive_path" -d "$destination"
-        return 0
-    fi
-    if command -v python3 &>/dev/null; then
-        python3 - "$archive_path" "$destination" <<'PY'
-import sys, zipfile
-archive = sys.argv[1]
-dest = sys.argv[2]
-with zipfile.ZipFile(archive, "r") as zf:
-    zf.extractall(dest)
-PY
-        return 0
-    fi
-    return 1
+    python3 - "$1" "$2" <<'PYZIP'
+import os
+import stat
+import sys
+import zipfile
+
+root = os.path.realpath(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for member in archive.infolist():
+        name = member.filename
+        parts = name.rstrip('/').split('/')
+        if (any(p in ('', '.', '..') for p in parts) or '\\' in name or ':' in name
+                or any(ord(c) < 32 for c in name) or stat.S_ISLNK(member.external_attr >> 16)):
+            raise ValueError('Unsafe archive member')
+        target = root
+        for part in parts:
+            target = os.path.join(target, part)
+            if os.path.islink(target):
+                raise ValueError('Symlink in extraction destination')
+    archive.extractall(root)
+PYZIP
 }
 
 # ---------- Install plugin from GitHub release ----------
 install_plugin_from_release() {
     info "Installing LuaTools plugin from latest GitHub release..."
     ensure_jq
+    require_cmd python3
     if ! command -v curl &>/dev/null; then
         fail "curl is required"
     fi
     local tmp_dir
     tmp_dir="$(mktemp -d)"
-    trap 'rm -rf "${tmp_dir:-}"' EXIT
+    LUATOOLS_RELEASE_TMP="$tmp_dir"
     local meta_file="$tmp_dir/release.json"
-    if ! curl -fsSL "$GITHUB_API_URL" -o "$meta_file"; then
+    if ! curl --proto '=https' --proto-redir '=https' -fsSL "$GITHUB_API_URL" -o "$meta_file"; then
         fail "Failed to fetch latest release metadata"
     fi
     local latest_tag asset_url
@@ -189,8 +277,20 @@ install_plugin_from_release() {
     info "Latest release: ${latest_tag:-unknown}"
     local zip_file="$tmp_dir/$RELEASE_ASSET_NAME"
     info "Downloading $RELEASE_ASSET_NAME ..."
-    if ! curl -fL "$asset_url" -o "$zip_file"; then
+    if ! curl --proto '=https' --proto-redir '=https' -fL "$asset_url" -o "$zip_file"; then
         fail "Download failed"
+    fi
+    local asset_digest expected_digest actual_digest
+    asset_digest=$(jq -r --arg name "$RELEASE_ASSET_NAME" '.assets[] | select(.name==$name) | .digest // empty' "$meta_file")
+    if [[ -n "$asset_digest" ]]; then
+        expected_digest="${asset_digest#sha256:}"
+        actual_digest="$(sha256sum "$zip_file" | awk '{print $1}')"
+        if [[ "$actual_digest" != "$expected_digest" ]]; then
+            fail "Checksum mismatch for release asset '$RELEASE_ASSET_NAME'; refusing to install"
+        fi
+        ok "Release asset digest verified"
+    else
+        warn "Release metadata did not expose a digest; plugin archive integrity is unverified."
     fi
     local millennium_dir=""
     local candidates=(
@@ -212,6 +312,7 @@ install_plugin_from_release() {
     fi
     local install_dir="$millennium_dir/$PLUGIN_NAME"
     info "Installing to $install_dir"
+    LUATOOLS_INSTALL_DIR="$install_dir"
     if [[ -d "$install_dir" ]]; then
         rm -rf "$install_dir"
     fi
@@ -249,7 +350,37 @@ check_python_dependencies() {
         pip_cmd="python3 -m pip"
     fi
     
-    local packages=("httpx==0.27.2" "beautifulsoup4" "ruamel.yaml==0.18.6")
+    local packages=("httpx==0.27.2" "beautifulsoup4==4.15.0" "ruamel.yaml==0.18.6")
+
+    # Prefer the hash-pinned lockfile shipped with the plugin (or fetched from
+    # the repository) so dependency installation is reproducible.
+    local lock_file=""
+    local lock_tmp=""
+    if [[ -n "$LUATOOLS_INSTALL_DIR" && -f "$LUATOOLS_INSTALL_DIR/requirements.lock" ]]; then
+        lock_file="$LUATOOLS_INSTALL_DIR/requirements.lock"
+    else
+        lock_tmp="$(mktemp)"
+        if curl --proto '=https' --proto-redir '=https' -fsSL "$SELF_REPO_BASE/requirements.lock" -o "$lock_tmp" 2>/dev/null; then
+            lock_file="$lock_tmp"
+        else
+            rm -f -- "$lock_tmp"; lock_tmp=""
+        fi
+    fi
+
+    if [[ -n "$lock_file" ]]; then
+        info "Installing pinned dependencies with hash verification..."
+        if $pip_cmd install --user --break-system-packages --require-hashes -r "$lock_file" &>/dev/null \
+            || $pip_cmd install --break-system-packages --require-hashes -r "$lock_file" &>/dev/null; then
+            [[ -n "$lock_tmp" ]] && rm -f -- "$lock_tmp"
+            if python3 -c "import httpx, bs4, ruamel.yaml" 2>/dev/null; then
+                ok "Python dependencies successfully installed (hash verified)."
+                return 0
+            fi
+        fi
+        warn "Hash-verified install failed; falling back to pinned requirements without hashes."
+        [[ -n "$lock_tmp" ]] && rm -f -- "$lock_tmp"
+    fi
+
     for pkg in "${packages[@]}"; do
         info "Installing $pkg ..."
         if $pip_cmd install --user --break-system-packages "$pkg" &>/dev/null; then
@@ -325,7 +456,7 @@ show_post_install_instructions() {
 # ---------- Pre-flight checks ----------
 check_internet() {
     info "Checking internet connectivity..."
-    if ! curl -fsS --head "https://github.com" >/dev/null 2>&1; then
+    if ! curl --proto '=https' --proto-redir '=https' -fsS --head "https://github.com" >/dev/null 2>&1; then
         fail "No internet connection"
     fi
     ok "Internet reachable"
@@ -447,7 +578,7 @@ check_decky_loader() {
         case "$response" in
             1)
                 info "Uninstalling Decky Loader..."
-                curl -fsSL https://github.com/SteamDeckHomebrew/decky-loader/raw/main/uninstall.sh | bash || warn "Uninstall failed."
+                run_remote_script https://github.com/SteamDeckHomebrew/decky-loader/raw/main/uninstall.sh || warn "Uninstall failed."
                 ok "Decky Loader removed"
                 ;;
             *)
@@ -594,7 +725,7 @@ clean_plugin_dir() {
 # ---------- fix-deps ----------
 run_fix_deps() {
     info "Running dependency fix script (fix-deps)..."
-    curl -fsSL https://raw.githubusercontent.com/ciscosweater/enter-the-wired/main/fix-deps | bash || warn "fix-deps failed, continuing..."
+    run_remote_script https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/fix-deps || warn "fix-deps failed, continuing..."
 }
 
 # ---------- libssl-dev check (Debian) ----------
@@ -621,14 +752,14 @@ check_libssl_dev() {
 # ---------- Installers ----------
 install_millennium_beta() {
     info "Installing Millennium beta via steambrew.app..."
-    curl -fsSL "https://steambrew.app/install.sh" | bash -s -- --beta || fail "Millennium beta installation failed."
+    run_remote_script "https://steambrew.app/install.sh" --beta || fail "Millennium beta installation failed."
     ok "Millennium beta installed"
 }
 
 install_millennium_legacy() {
     info "Installing Millennium Legacy (old version) + LuaTools plugin..."
     force_close_steam
-    curl -fsSL "https://github.com/SteamClientHomebrew/Millennium/raw/refs/heads/legacy/scripts/install.sh" | bash || fail "Millennium Legacy installation failed."
+    run_remote_script "https://github.com/SteamClientHomebrew/Millennium/raw/refs/heads/legacy/scripts/install.sh" || fail "Millennium Legacy installation failed."
     ok "Millennium Legacy installed"
     install_plugin_from_release
     check_python_dependencies
@@ -638,14 +769,14 @@ install_millennium_legacy() {
 
 install_accela_and_slssteam() {
     info "Installing accela and slssteam via enter-the-wired (standard AppImage version)..."
-    curl -fsSL https://raw.githubusercontent.com/ciscosweater/enter-the-wired/main/enter-the-wired | bash || warn "Accela installation failed."
+    run_remote_script https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/enter-the-wired || warn "Accela installation failed."
     ok "Accela and slssteam installed"
 }
 
 install_legacy_accela_and_sls() {
     info "Installing Legacy Accela (source-based, run.sh) + SLSsteam (headcrab)..."
     info "This combination fixes AppImage compatibility issues by using the Python source version from aglairdev/enter-the-wired."
-    curl -fsSL "$LEGACY_ACCELA_REPO" | bash || fail "Legacy Accela installation failed."
+    run_remote_script "$LEGACY_ACCELA_REPO" || fail "Legacy Accela installation failed."
     ok "Legacy Accela (run.sh) and SLSsteam installed successfully."
     show_post_install_instructions
 }
@@ -662,9 +793,11 @@ install_accela_fix_illegal_instruction() {
     if ! git clone "$ACCELA_FIX_REPO" ACCELA_FIX; then
         warn "Git clone failed. Trying with curl fallback..."
         rm -rf ACCELA_FIX
-        curl -fsSL "https://github.com/Cybercountry/ACCELA_FIX/archive/refs/heads/main.tar.gz" | tar xz --strip-components=1 -C "$temp_dir" || {
+        local accela_tar="$temp_dir/accela_fix.tar.gz"
+        if ! download_verified "https://github.com/Cybercountry/ACCELA_FIX/archive/refs/heads/main.tar.gz" "$accela_tar"; then
             fail "Failed to download ACCELA_FIX"
-        }
+        fi
+        tar xzf "$accela_tar" -C "$temp_dir" --strip-components=1 || fail "Failed to extract ACCELA_FIX"
         if [[ ! -f "$temp_dir/RUN_ME" ]]; then
             fail "Could not obtain ACCELA_FIX files."
         fi
@@ -687,7 +820,7 @@ install_accela_fix_illegal_instruction() {
     rm -rf "$temp_dir"
     
     info "Installing SLSsteam via headcrab..."
-    if ! curl -fsSL "$HEADCRAB_URL" | bash; then
+    if ! run_remote_script "$HEADCRAB_URL"; then
         warn "SLSsteam installation had issues. You may need to run headcrab manually later."
     else
         ok "SLSsteam installed successfully."
@@ -755,7 +888,7 @@ install_legacy_accela_and_sls_only() {
 # ---------- Fixes menu (with new options) ----------
 fix_purchase_error() {
     info "Fixing 'Purchase error' by running headcrab script..."
-    curl -fsSL "$HEADCRAB_URL" | bash || warn "Headcrab script failed."
+    run_remote_script "$HEADCRAB_URL" || warn "Headcrab script failed."
     ok "Purchase error fix attempted."
 }
 
@@ -768,8 +901,10 @@ fix_missing_keys() {
         git clone "$ENTERTHEWIRED_REPO" "$HOME/enter-the-wired" || {
             warn "Git clone failed. Trying curl..."
             mkdir -p "$HOME/enter-the-wired"
-            curl -fsSL "https://raw.githubusercontent.com/ciscosweater/enter-the-wired/main/slssteam" -o "$HOME/enter-the-wired/slssteam"
-            chmod +x "$HOME/enter-the-wired/slssteam"
+            if ! download_verified "https://raw.githubusercontent.com/ciscosweater/enter-the-wired/main/slssteam" "$HOME/enter-the-wired/slssteam"; then
+                warn "Could not download a hash-verified slssteam script."
+            fi
+            chmod +x "$HOME/enter-the-wired/slssteam" 2>/dev/null || true
         }
     fi
     if [[ -x "$HOME/enter-the-wired/slssteam" ]]; then
@@ -1213,8 +1348,8 @@ fix_menu() {
 # ---------- Uninstall ----------
 uninstall_all_flow() {
     info "Uninstalling everything (Millennium, plugin, accela, slssteam)..."
-    sudo rm -rf /usr/lib/millennium /usr/share/millennium \
-                "${XDG_CONFIG_HOME:-$HOME/.config}/millennium" \
+    sudo rm -rf /usr/lib/millennium /usr/share/millennium
+    rm -rf -- "${XDG_CONFIG_HOME:-$HOME/.config}/millennium" \
                 "${XDG_DATA_HOME:-$HOME/.local/share}/millennium"
     if [ -f "/usr/bin/steam.millennium.bak" ]; then
         sudo mv /usr/bin/steam.millennium.bak /usr/bin/steam
@@ -1224,7 +1359,7 @@ uninstall_all_flow() {
            "${XDG_CONFIG_HOME:-$HOME/.config}/luatools" \
            "${HOME}/.luatools" 2>/dev/null || true
     clean_plugin_dir
-    curl -fsSL https://raw.githubusercontent.com/ciscosweater/enter-the-wired/main/uninstall | bash || warn "Accela/slssteam uninstall may have failed."
+    run_remote_script https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/uninstall || warn "Accela/slssteam uninstall may have failed."
     ok "Full uninstall completed."
 }
 
@@ -1274,6 +1409,8 @@ main() {
     done
     require_cmd curl
     require_cmd bash
+    require_cmd python3
+    load_dependency_lock
     if ! command -v git >/dev/null; then
         warn "git not installed. Some fix functions may fail."
     fi

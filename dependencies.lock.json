@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "generated": "2026-09-15",
+  "note": "SHA-256 pins for third-party resources fetched by the installer. Update intentionally once a new upstream revision has been reviewed. A hash mismatch is FATAL.",
+  "resources": {
+    "https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/fix-deps": {
+      "sha256": "96d5b6c62fe516cecdb44e3ed5c04a33beab1b7f7301008415a416fe9fbdc741",
+      "source": "ciscosweater/enter-the-wired",
+      "commit": "3cba346164cbb232da60dffe56f132cbeb13bcf6"
+    },
+    "https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/enter-the-wired": {
+      "sha256": "46dd3a0eeea37635966fc227018f602242923feee43c002b9f45d4140eb215c7",
+      "source": "ciscosweater/enter-the-wired",
+      "commit": "3cba346164cbb232da60dffe56f132cbeb13bcf6"
+    },
+    "https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/uninstall": {
+      "sha256": "bf14271b8bd61d0c11ecbbade3361199ffb0e30428c3f1474d1055e188341f4e",
+      "source": "ciscosweater/enter-the-wired",
+      "commit": "3cba346164cbb232da60dffe56f132cbeb13bcf6"
+    },
+    "https://steambrew.app/install.sh": {
+      "sha256": "8996fbc98d6b5bd15776c46c8dd0c26e5cfa13bbcff2d0613ac6719109441a27",
+      "source": "steambrew.app official installer"
+    },
+    "https://headcrab.pages.dev": {
+      "sha256": "d2dfac7b5d7b5f6fe99917bb948fe7c2e1392aeb78414fc31094170a593da3cb",
+      "source": "headcrab.pages.dev official installer"
+    },
+    "https://github.com/Cybercountry/ACCELA_FIX/archive/refs/heads/main.tar.gz": {
+      "sha256": "4f46c82d4c6744d5a1ab9b9adf2e46e7064c0540df48820890ac56fbe8df8a2d",
+      "source": "Cybercountry/ACCELA_FIX@main",
+      "commit": "5cd305ec8ab44b7ed5864f8dada22bc5de863006"
+    }
+  }
+}

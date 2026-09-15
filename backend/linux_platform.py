@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import shlex
 from typing import Optional
 
 
@@ -153,7 +154,7 @@ def open_directory(path: str) -> None:
 def _get_ld_audit_line() -> str:
     """Build the LD_AUDIT export line using the detected SLSsteam install dir."""
     sls_dir = get_slssteam_install_dir()
-    return f'export LD_AUDIT={sls_dir}/library-inject.so:{sls_dir}/SLSsteam.so'
+    return 'export LD_AUDIT=' + shlex.quote(f'{sls_dir}/library-inject.so:{sls_dir}/SLSsteam.so')
 
 
 def verify_slssteam_injected() -> dict:

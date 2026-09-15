@@ -5,14 +5,16 @@
             "url": "http://167.235.229.108/m/<appid>",
             "success_code": 200,
             "unavailable_code": 404,
-            "enabled": true
+            "enabled": false,
+            "insecure": true
         },
         {
             "name": "Ryuu",
             "url": "http://167.235.229.108/<appid>",
             "success_code": 200,
             "unavailable_code": 404,
-            "enabled": true
+            "enabled": false,
+            "insecure": true
         },
         {
             "name": "Sushi",
@@ -27,6 +29,6 @@
             "success_code": 200,
             "unavailable_code": 404,
             "enabled": true
-        },
+        }
     ]
 }

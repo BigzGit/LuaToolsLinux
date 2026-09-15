@@ -28,29 +28,27 @@ require_cmd() {
 }
 
 extract_zip() {
-    local archive="$1"
-    local dest="$2"
-
-    if command -v unzip >/dev/null 2>&1; then
-        unzip -qo "$archive" -d "$dest"
-        return 0
-    fi
-
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$archive" "$dest" <<'PY'
+    python3 - "$1" "$2" <<'PYZIP'
+import os
+import stat
 import sys
 import zipfile
 
-archive = sys.argv[1]
-dest = sys.argv[2]
-
-with zipfile.ZipFile(archive, "r") as zf:
-    zf.extractall(dest)
-PY
-        return 0
-    fi
-
-    return 1
+root = os.path.realpath(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for member in archive.infolist():
+        name = member.filename
+        parts = name.rstrip('/').split('/')
+        if (any(p in ('', '.', '..') for p in parts) or '\\' in name or ':' in name
+                or any(ord(c) < 32 for c in name) or stat.S_ISLNK(member.external_attr >> 16)):
+            raise ValueError('Unsafe archive member')
+        target = root
+        for part in parts:
+            target = os.path.join(target, part)
+            if os.path.islink(target):
+                raise ValueError('Symlink in extraction destination')
+    archive.extractall(root)
+PYZIP
 }
 
 main() {
@@ -65,7 +63,7 @@ main() {
     local zip_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/zip/refs/heads/${BRANCH}"
 
     info "Downloading LuaTools bundle from ${REPO_OWNER}/${REPO_NAME}@${BRANCH}"
-    curl -fsSL "$zip_url" -o "$archive"
+    curl --proto '=https' --proto-redir '=https' -fsSL "$zip_url" -o "$archive"
 
     mkdir -p "$src"
     if ! extract_zip "$archive" "$src"; then
@@ -105,27 +103,36 @@ main() {
     fi
 
     mkdir -p "$BIN_DIR"
+    local quoted_python quoted_cli quoted_bridge quoted_injector quoted_root
+    printf -v quoted_python '%q' "$VENV_DIR/bin/python"
+    printf -v quoted_cli '%q' "$INSTALL_ROOT/backend/standalone_cli.py"
+    printf -v quoted_bridge '%q' "$INSTALL_ROOT/backend/web_bridge_server.py"
+    printf -v quoted_injector '%q' "$INSTALL_ROOT/backend/ui_injector.py"
+    printf -v quoted_root '%q' "$INSTALL_ROOT"
     cat > "$WRAPPER_PATH" <<EOF
 #!/usr/bin/env bash
-PYTHON_BIN="$VENV_DIR/bin/python"
+PYTHON_BIN=$quoted_python
 if [[ ! -x "\$PYTHON_BIN" ]]; then
     PYTHON_BIN=python3
 fi
-exec "\$PYTHON_BIN" "$INSTALL_ROOT/backend/standalone_cli.py" "\$@"
+exec "\$PYTHON_BIN" $quoted_cli "\$@"
 EOF
     chmod +x "$WRAPPER_PATH"
 
     cat > "$BRIDGE_STARTER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PYTHON_BIN="$VENV_DIR/bin/python"
+PYTHON_BIN=$quoted_python
 if [[ ! -x "\$PYTHON_BIN" ]]; then
     PYTHON_BIN=python3
 fi
 BRIDGE_HOST="127.0.0.1"
 BRIDGE_PORT="38495"
 LOG_FILE="\${XDG_STATE_HOME:-\$HOME/.local/state}/luatools/bridge.log"
-PID_FILE="\${XDG_RUNTIME_DIR:-/tmp}/luatools-bridge.pid"
+umask 077
+PID_DIR="\${XDG_STATE_HOME:-\$HOME/.local/state}/luatools"
+mkdir -p "\$PID_DIR"
+PID_FILE="\$PID_DIR/bridge.pid"
 mkdir -p "\$(dirname "\$LOG_FILE")"
 
 if [[ -f "\$PID_FILE" ]]; then
@@ -135,7 +142,7 @@ if [[ -f "\$PID_FILE" ]]; then
     rm -f "\$PID_FILE"
 fi
 
-nohup "\$PYTHON_BIN" "$INSTALL_ROOT/backend/web_bridge_server.py" --host "\$BRIDGE_HOST" --port "\$BRIDGE_PORT" >>"\$LOG_FILE" 2>&1 &
+nohup "\$PYTHON_BIN" $quoted_bridge --host "\$BRIDGE_HOST" --port "\$BRIDGE_PORT" >>"\$LOG_FILE" 2>&1 &
 echo "\$!" > "\$PID_FILE"
 
 health_url="http://\$BRIDGE_HOST:\$BRIDGE_PORT/health"
@@ -164,17 +171,17 @@ EOF
     cat > "$UI_HEALER" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PYTHON_BIN="$VENV_DIR/bin/python"
+PYTHON_BIN=$quoted_python
 if [[ ! -x "\$PYTHON_BIN" ]]; then
     PYTHON_BIN=python3
 fi
-export LUATOOLS_INSTALL_ROOT="$INSTALL_ROOT"
-exec "\$PYTHON_BIN" "$INSTALL_ROOT/backend/ui_injector.py"
+export LUATOOLS_INSTALL_ROOT=$quoted_root
+exec "\$PYTHON_BIN" $quoted_injector
 EOF
     chmod +x "$UI_HEALER"
 
     local ui_output=""
-    if ! ui_output="$($UI_HEALER 2>&1)"; then
+    if ! ui_output="$("$UI_HEALER" 2>&1)"; then
         warn "UI self-heal step failed"
         if [ -n "$ui_output" ]; then
             warn "$ui_output"

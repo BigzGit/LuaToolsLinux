@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from typing import List, Tuple
+from urllib.parse import urlsplit
 
 from config import USER_AGENT
 from http_client import get_http_client
@@ -13,7 +14,26 @@ from logger import logger
 # Import private VDF parser - it's used internally for config.vdf parsing
 from steam_utils import _parse_vdf_simple  # type: ignore
 
-DONATION_URL = "http://167.235.229.108/donatekeys/send"
+# No verified upstream HTTPS endpoint is supplied by the repository.
+# An operator must configure a trusted recipient; never fall back to HTTP.
+def get_donation_url() -> str:
+    url = os.environ.get('LUATOOLS_DONATION_URL', '').strip()
+    try:
+        parsed = urlsplit(url)
+        if (parsed.scheme != 'https' or not parsed.hostname or parsed.username
+                or parsed.password or parsed.fragment or any(ord(c) < 33 for c in url)):
+            return ''
+        parsed.port  # Reject malformed ports before reading any keys.
+    except ValueError:
+        return ''
+    return url
+
+
+def donation_enabled() -> bool:
+    from settings.manager import get_settings_state
+    state = get_settings_state()
+    return state['values'].get('general', {}).get('donateKeys') is True and bool(get_donation_url())
+
 DONATION_HEADERS = {
     "Content-Type": "text/plain",
     "User-Agent": USER_AGENT,
@@ -171,15 +191,22 @@ def send_donation_keys(pairs: List[Tuple[str, str]]) -> bool:
         return False
     
     try:
+        # Enforce consent here as well as in the background worker.
+        if not donation_enabled():
+            return False
+        url = get_donation_url()
+        if not url:
+            return False
         formatted_data = format_keys_for_donation(pairs)
         client = get_http_client()
         
         logger.log(f"LuaTools: Sending {len(pairs)} appid/key pairs to donation endpoint...")
         
         response = client.post(
-            DONATION_URL,
+            url,
             headers=DONATION_HEADERS,
             content=formatted_data,
+            follow_redirects=False,
         )
         
         status_code = response.status_code
@@ -193,6 +220,6 @@ def send_donation_keys(pairs: List[Tuple[str, str]]) -> bool:
             return False
             
     except Exception as exc:
-        logger.warn(f"LuaTools: Failed to send donation keys: {exc}")
+        logger.warn("LuaTools: Failed to send donation keys; no retry or insecure fallback")
         return False
 

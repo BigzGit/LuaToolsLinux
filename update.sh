@@ -32,29 +32,27 @@ cleanup() {
 }
 
 extract_zip() {
-    local archive_path="$1"
-    local destination="$2"
-
-    if command -v unzip &>/dev/null; then
-        unzip -qo "$archive_path" -d "$destination"
-        return 0
-    fi
-
-    if command -v python3 &>/dev/null; then
-        python3 - "$archive_path" "$destination" <<'PY'
+    python3 - "$1" "$2" <<'PYZIP'
+import os
+import stat
 import sys
 import zipfile
 
-archive = sys.argv[1]
-destination = sys.argv[2]
-
-with zipfile.ZipFile(archive, "r") as zf:
-    zf.extractall(destination)
-PY
-        return 0
-    fi
-
-    return 1
+root = os.path.realpath(sys.argv[2])
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    for member in archive.infolist():
+        name = member.filename
+        parts = name.rstrip('/').split('/')
+        if (any(p in ('', '.', '..') for p in parts) or '\\' in name or ':' in name
+                or any(ord(c) < 32 for c in name) or stat.S_ISLNK(member.external_attr >> 16)):
+            raise ValueError('Unsafe archive member')
+        target = root
+        for part in parts:
+            target = os.path.join(target, part)
+            if os.path.islink(target):
+                raise ValueError('Symlink in extraction destination')
+    archive.extractall(root)
+PYZIP
 }
 
 echo ""
@@ -114,7 +112,7 @@ trap cleanup EXIT
 RELEASE_META_FILE="$TMP_DIR/release.json"
 RELEASE_ARCHIVE_FILE="$TMP_DIR/$RELEASE_ASSET_NAME"
 
-if ! curl -fsSL "$GITHUB_API_URL" -o "$RELEASE_META_FILE"; then
+if ! curl --proto '=https' --proto-redir '=https' -fsSL "$GITHUB_API_URL" -o "$RELEASE_META_FILE"; then
     fail "Failed to fetch latest release metadata"
 fi
 
@@ -131,19 +129,23 @@ with open(meta_file, "r", encoding="utf-8") as f:
 
 tag = str(data.get("tag_name", "")).strip()
 asset_url = ""
+asset_digest = ""
 
 for asset in data.get("assets", []):
     if str(asset.get("name", "")).strip() == asset_name:
         asset_url = str(asset.get("browser_download_url", "")).strip()
+        asset_digest = str(asset.get("digest") or "").strip()
         break
 
 print(tag)
 print(asset_url)
+print(asset_digest)
 PY
 )
 
 LATEST_TAG="${RELEASE_INFO[0]:-}"
 ASSET_URL="${RELEASE_INFO[1]:-}"
+ASSET_DIGEST="${RELEASE_INFO[2]:-}"
 
 if [ -z "$ASSET_URL" ]; then
     fail "Could not find release asset '$RELEASE_ASSET_NAME' in latest release"
@@ -154,8 +156,19 @@ if [ -n "$LATEST_TAG" ]; then
 fi
 
 info "Downloading release asset: $RELEASE_ASSET_NAME"
-if ! curl -fL "$ASSET_URL" -o "$RELEASE_ARCHIVE_FILE"; then
+if ! curl --proto '=https' --proto-redir '=https' -fL "$ASSET_URL" -o "$RELEASE_ARCHIVE_FILE"; then
     fail "Failed to download release asset"
+fi
+
+if [ -n "$ASSET_DIGEST" ]; then
+    EXPECTED_DIGEST="${ASSET_DIGEST#sha256:}"
+    ACTUAL_DIGEST="$(sha256sum "$RELEASE_ARCHIVE_FILE" | awk '{print $1}')"
+    if [ "$ACTUAL_DIGEST" != "$EXPECTED_DIGEST" ]; then
+        fail "Checksum mismatch for release asset; refusing to install"
+    fi
+    ok "Release asset digest verified"
+else
+    warn "Release metadata did not expose a digest; archive integrity is unverified."
 fi
 
 BACKUP_DIR=""

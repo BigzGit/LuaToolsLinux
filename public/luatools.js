@@ -2,6 +2,12 @@
 (function() {
     'use strict';
 
+    function escapeHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, function(c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
     // Fallback RPC bridge so LuaTools UI still works without Millennium.
     (function ensureMillenniumBridge() {
         try {
@@ -16,7 +22,7 @@
                     };
                     return fetch('http://127.0.0.1:38495/rpc', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'X-LuaTools-Token': '__LUATOOLS_BRIDGE_TOKEN__' },
                         body: JSON.stringify(payload)
                     }).then(function(res) {
                         if (!res || !res.ok) {
@@ -882,7 +888,7 @@
                                     try { overlay.remove(); } catch(_) {}
 
                                     // AVISO AGRESSIVO EM INGLÊS
-                                    const warningHtml = '<div style="color:#ff5c5c; font-size:16px; font-weight:bold; margin-bottom:12px; text-transform:uppercase;"><i class="fa-solid fa-triangle-exclamation"></i> Warning: Full Game Deletion</div><div style="font-size:14px; color:#dfe6f0;">Are you absolutely sure you want to proceed?<br><br>This will <b>permanently delete the entire game folder</b> from your Steam library, including all game files, mods, and fixes.<br><br><i style="color:#ff5c5c;">This action cannot be undone.</i></div>';
+                                    const warningHtml = { trustedHtml: '<div style="color:#ff5c5c; font-size:16px; font-weight:bold; margin-bottom:12px; text-transform:uppercase;"><i class="fa-solid fa-triangle-exclamation"></i> Warning: Full Game Deletion</div><div style="font-size:14px; color:#dfe6f0;">Are you absolutely sure you want to proceed?<br><br>This will <b>permanently delete the entire game folder</b> from your Steam library, including all game files, mods, and fixes.<br><br><i style="color:#ff5c5c;">This action cannot be undone.</i></div>' };
 
                                     showLuaToolsConfirm('DANGER ZONE', warningHtml, function(){
                                         doDelete();
@@ -2744,7 +2750,9 @@
                         const optionDesc = document.createElement('div');
                         optionDesc.style.cssText = 'margin-top:2px;font-size:12px;color:#a9b2c3;';
                         const descKey = optionDescriptionKey(group.key, option.key);
-                        optionDesc.textContent = t(descKey || ('settings.' + group.key + '.' + option.key + '.description'), option.description);
+                        optionDesc.textContent = (group.key === 'general' && option.key === 'donateKeys')
+                            ? option.description
+                            : t(descKey || ('settings.' + group.key + '.' + option.key + '.description'), option.description);
                         optionEl.appendChild(optionDesc);
                     }
 
@@ -2955,13 +2963,13 @@
 
             if (fix.fixType) {
                 const typeSpan = document.createElement('div');
-                typeSpan.innerHTML = '<strong style="color:var(--lt-accent);">' + t('settings.installedFixes.type', 'Type:') + '</strong> ' + fix.fixType;
+                typeSpan.innerHTML = '<strong style="color:var(--lt-accent);">' + t('settings.installedFixes.type', 'Type:') + '</strong> ' + escapeHtml(fix.fixType);
                 detailsDiv.appendChild(typeSpan);
             }
 
             if (fix.date) {
                 const dateSpan = document.createElement('div');
-                dateSpan.innerHTML = '<strong style="color:var(--lt-accent);">' + t('settings.installedFixes.date', 'Installed:') + '</strong> ' + fix.date;
+                dateSpan.innerHTML = '<strong style="color:var(--lt-accent);">' + t('settings.installedFixes.date', 'Installed:') + '</strong> ' + escapeHtml(fix.date);
                 detailsDiv.appendChild(dateSpan);
             }
 
@@ -2998,7 +3006,7 @@
                 e.preventDefault();
                 if (deleteBtn.dataset.busy === '1') return;
 
-                const warningHtml = '<div style="color:#ff5c5c; font-size:16px; font-weight:bold; margin-bottom:12px; text-transform:uppercase;"><i class="fa-solid fa-triangle-exclamation"></i> Warning: Full Game Deletion</div><div style="font-size:14px; color:#dfe6f0;">Are you absolutely sure you want to proceed?<br><br>This will <b>permanently delete the entire game folder</b> from your Steam library.<br><br><i style="color:#ff5c5c;">This action cannot be undone.</i></div>';
+                const warningHtml = { trustedHtml: '<div style="color:#ff5c5c; font-size:16px; font-weight:bold; margin-bottom:12px; text-transform:uppercase;"><i class="fa-solid fa-triangle-exclamation"></i> Warning: Full Game Deletion</div><div style="font-size:14px; color:#dfe6f0;">Are you absolutely sure you want to proceed?<br><br>This will <b>permanently delete the entire game folder</b> from your Steam library.<br><br><i style="color:#ff5c5c;">This action cannot be undone.</i></div>' };
 
                 showLuaToolsConfirm(
                     'DANGER ZONE',
@@ -3215,7 +3223,7 @@
 
             if (script.modifiedDate) {
                 const dateSpan = document.createElement('div');
-                dateSpan.innerHTML = '<strong style="color:var(--lt-accent);">' + t('settings.installedLua.modified', 'Modified:') + '</strong> ' + script.modifiedDate;
+                dateSpan.innerHTML = '<strong style="color:var(--lt-accent);">' + t('settings.installedLua.modified', 'Modified:') + '</strong> ' + escapeHtml(script.modifiedDate);
                 detailsDiv.appendChild(dateSpan);
             }
 
@@ -3318,7 +3326,7 @@
                 setStatus('', 'var(--lt-text-secondary)');
             }).catch(function(err){
                 const message = err && err.message ? err.message : t('settings.error', 'Failed to load settings.');
-                contentWrap.innerHTML = '<div style="padding:20px;color:#ff5c5c;">' + message + '</div>';
+                contentWrap.innerHTML = '<div style="padding:20px;color:#ff5c5c;">' + escapeHtml(message) + '</div>';
                 setStatus(t('common.status.error', 'Error') + ': ' + message, '#ff5c5c');
             });
         }
@@ -3557,7 +3565,11 @@
 
         const messageEl = document.createElement('div');
         messageEl.style.cssText = 'font-size:15px;line-height:1.6;margin-bottom:28px;color:var(--lt-text-secondary);text-align:center;';
-        messageEl.innerHTML = String(message || lt('Are you sure?'));
+        if (message && typeof message === 'object' && typeof message.trustedHtml === 'string') {
+            messageEl.innerHTML = message.trustedHtml;
+        } else {
+            messageEl.textContent = String(message || lt('Are you sure?'));
+        }
 
         const btnRow = document.createElement('div');
         btnRow.style.cssText = 'display:flex;gap:12px;justify-content:center;';
@@ -3689,7 +3701,7 @@
             span.style.setProperty('color', textColor, 'important');
             span.style.setProperty('font-weight', '800', 'important');
             span.style.setProperty('text-shadow', 'none', 'important');
-            span.innerHTML = `ProtonDB: ${labelText}`;
+            span.textContent = `ProtonDB: ${labelText}`;
         };
 
         // --- 2. DETETIVE VISUAL (Instantâneo para Nativos) ---

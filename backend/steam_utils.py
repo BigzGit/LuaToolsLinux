@@ -11,6 +11,7 @@ from typing import Dict, Optional
 from platform_bridge import Millennium
 
 from logger import logger
+from security import game_install_path
 
 _STEAM_INSTALL_PATH: Optional[str] = None
 
@@ -119,6 +120,36 @@ def _find_steam_path() -> str:
     return ""
 
 
+def get_steam_library_paths() -> list:
+    """Return every Steam library root declared in libraryfolders.vdf."""
+    paths = []
+    steam_path = _find_steam_path()
+    if not steam_path:
+        return paths
+    paths.append(steam_path)
+
+    library_vdf_path = os.path.join(steam_path, "config", "libraryfolders.vdf")
+    if not os.path.exists(library_vdf_path):
+        return paths
+
+    try:
+        with open(library_vdf_path, "r", encoding="utf-8") as handle:
+            library_data = _parse_vdf_simple(handle.read())
+    except Exception as exc:
+        logger.warn(f"LuaTools: Failed to read libraryfolders.vdf for library list: {exc}")
+        return paths
+
+    library_folders = library_data.get("libraryfolders", {})
+    for folder_data in library_folders.values():
+        if isinstance(folder_data, dict):
+            folder_path = folder_data.get("path", "")
+            if folder_path:
+                folder_path = folder_path.replace("\\\\", "\\")
+                if folder_path not in paths:
+                    paths.append(folder_path)
+    return paths
+
+
 def has_lua_for_app(appid: int) -> bool:
     try:
         base_path = detect_steam_install_path() or Millennium.steam_path()
@@ -208,7 +239,10 @@ def get_game_install_path_response(appid: int) -> Dict[str, any]:
         logger.warn(f"LuaTools: installdir not found in appmanifest for {appid}")
         return {"success": False, "error": "Install directory not found"}
 
-    full_install_path = os.path.join(library_path, "steamapps", "common", install_dir)
+    try:
+        full_install_path = game_install_path(library_path, install_dir)
+    except ValueError:
+        return {"success": False, "error": "Invalid install directory"}
     if not os.path.exists(full_install_path):
         logger.warn(f"LuaTools: Game install path does not exist: {full_install_path}")
         return {"success": False, "error": "Game directory not found"}
@@ -244,6 +278,7 @@ def open_game_folder(path: str) -> bool:
 __all__ = [
     "detect_steam_install_path",
     "get_game_install_path_response",
+    "get_steam_library_paths",
     "has_lua_for_app",
     "open_game_folder",
 ]

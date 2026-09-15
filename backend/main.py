@@ -11,6 +11,8 @@ import stat  # <--- Importante para permissões no Linux
 import json
 import urllib.request
 
+from security import atomic_write_text, validated_ids, validate_id
+
 from typing import Any
 
 from platform_bridge import Millennium
@@ -110,6 +112,7 @@ def load_workshop_tool_path():
 #  GERENCIAMENTO DE FAKE APP ID (Atomic Write)
 # ==========================================
 
+@validated_ids
 def AddFakeAppId(appid: int, contentScriptQuery: str = "") -> str:
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
@@ -117,10 +120,7 @@ def AddFakeAppId(appid: int, contentScriptQuery: str = "") -> str:
         if not os.path.exists(config_path):
              try:
                  os.makedirs(os.path.dirname(config_path), exist_ok=True)
-                 tmp_path = config_path + ".tmp"
-                 with open(tmp_path, 'w') as f:
-                     f.write("FakeAppIds:\n")
-                 os.replace(tmp_path, config_path)
+                 atomic_write_text(config_path, "FakeAppIds:\n")
              except:
                  return json.dumps({"success": False, "error": "Failed to create config.yaml"})
 
@@ -150,10 +150,7 @@ def AddFakeAppId(appid: int, contentScriptQuery: str = "") -> str:
         elif has_tag and not inserted:
              new_lines.append(entry_line)
 
-        tmp_path = config_path + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.writelines(new_lines)
-        os.replace(tmp_path, config_path)
+        atomic_write_text(config_path, "".join(new_lines))
 
         logger.log(f"[LuaTools] FakeAppId 480 added for {appid}")
         return json.dumps({"success": True, "message": f"FakeAppId (480) adicionado!"})
@@ -162,6 +159,7 @@ def AddFakeAppId(appid: int, contentScriptQuery: str = "") -> str:
         logger.error(f"[LuaTools] FakeAppId Error: {e}")
         return json.dumps({"success": False, "error": str(e)})
 
+@validated_ids
 def RemoveFakeAppId(appid: int, contentScriptQuery: str = "") -> str:
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
@@ -184,16 +182,14 @@ def RemoveFakeAppId(appid: int, contentScriptQuery: str = "") -> str:
             new_lines.append(line)
 
         if modified:
-            tmp_path = config_path + ".tmp"
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
-            os.replace(tmp_path, config_path)
+            atomic_write_text(config_path, "".join(new_lines))
 
         return json.dumps({"success": True, "message": "FakeAppId removido."})
     except Exception as e:
         logger.warn(f"[LuaTools] Error cleaning FakeAppId: {e}")
         return json.dumps({"success": False, "error": str(e)})
 
+@validated_ids
 def CheckFakeAppIdStatus(appid: int, contentScriptQuery: str = "") -> str:
     """Verifica se o FakeAppId já existe no config."""
     try:
@@ -215,6 +211,7 @@ def CheckFakeAppIdStatus(appid: int, contentScriptQuery: str = "") -> str:
 #  GERENCIAMENTO DE TOKENS (Atomic Write)
 # ==========================================
 
+@validated_ids
 def AddGameToken(appid: int, contentScriptQuery: str = "") -> str:
     try:
         backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -232,15 +229,14 @@ def AddGameToken(appid: int, contentScriptQuery: str = "") -> str:
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
 
         if not os.path.exists(config_path):
-             tmp_path = config_path + ".tmp"
-             with open(tmp_path, 'w', encoding='utf-8') as f:
-                 f.write("AppTokens:\n")
-             os.replace(tmp_path, config_path)
+             atomic_write_text(config_path, "AppTokens:\n")
 
         with open(json_path, 'r', encoding='utf-8') as f:
             tokens_db = json.load(f)
 
         token = tokens_db.get(str(appid))
+        if token is not None:
+            token = str(validate_id(token, 0xFFFFFFFFFFFFFFFF))
 
         if not token:
             return json.dumps({"success": False, "error": f"Token não encontrado para o AppID {appid}."})
@@ -270,10 +266,7 @@ def AddGameToken(appid: int, contentScriptQuery: str = "") -> str:
         elif has_tag and not inserted:
              new_lines.append(f"  {entry}\n")
 
-        tmp_path = config_path + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.writelines(new_lines)
-        os.replace(tmp_path, config_path)
+        atomic_write_text(config_path, "".join(new_lines))
 
         return json.dumps({"success": True, "message": f"Token adicionado!"})
 
@@ -281,6 +274,7 @@ def AddGameToken(appid: int, contentScriptQuery: str = "") -> str:
         logger.error(f"[LuaTools] Token Error: {e}")
         return json.dumps({"success": False, "error": str(e)})
 
+@validated_ids
 def RemoveGameToken(appid: int, contentScriptQuery: str = "") -> str:
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
@@ -305,16 +299,14 @@ def RemoveGameToken(appid: int, contentScriptQuery: str = "") -> str:
             new_lines.append(line)
 
         if token_removed:
-            tmp_path = config_path + ".tmp"
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
-            os.replace(tmp_path, config_path)
+            atomic_write_text(config_path, "".join(new_lines))
 
         return json.dumps({"success": True, "message": "Token successfully removed."})
     except Exception as e:
         logger.warn(f"[LuaTools] Erro ao tentar limpar token: {e}")
         return json.dumps({"success": False, "error": str(e)})
 
+@validated_ids
 def CheckGameTokenStatus(appid: int, contentScriptQuery: str = "") -> str:
     """Verifica se o Token já existe no config."""
     try:
@@ -419,16 +411,19 @@ def InstallDependencies(contentScriptQuery: str = "") -> str:
 
         venv_dir = os.path.join(plugin_root, ".venv")
         requirements_file = os.path.join(plugin_root, "requirements.txt")
+        lock_file = os.path.join(plugin_root, "requirements.lock")
 
         if not os.path.exists(requirements_file):
              requirements_file = os.path.join(current_dir, "requirements.txt")
+        if not os.path.exists(lock_file):
+             lock_file = os.path.join(current_dir, "requirements.lock")
 
         if sys.platform == "win32":
             venv_python = os.path.join(venv_dir, "Scripts", "python.exe")
         else:
             venv_python = os.path.join(venv_dir, "bin", "python")
 
-        if not os.path.exists(requirements_file):
+        if not os.path.exists(requirements_file) and not os.path.exists(lock_file):
             return json.dumps({"success": False, "error": "Arquivo requirements.txt não encontrado!"})
 
         if not os.path.exists(venv_dir) or not os.path.exists(venv_python):
@@ -436,7 +431,11 @@ def InstallDependencies(contentScriptQuery: str = "") -> str:
             subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
 
         logger.log(f"[LuaTools] Instalando dependências...")
-        subprocess.check_call([venv_python, "-m", "pip", "install", "-r", requirements_file])
+        if os.path.exists(lock_file):
+            # Hash-verified, reproducible install.
+            subprocess.check_call([venv_python, "-m", "pip", "install", "--require-hashes", "-r", lock_file])
+        else:
+            subprocess.check_call([venv_python, "-m", "pip", "install", "-r", requirements_file])
 
         return json.dumps({"success": True, "message": "Dependencies installed successfully!"})
 
@@ -459,6 +458,7 @@ workshop_state = {
     "process": None
 }
 
+@validated_ids
 def _run_depot_downloader_workshop(appid: str, pubfile_id: str, download_dir: str):
     global workshop_state
 
@@ -622,6 +622,7 @@ def _run_depot_downloader_workshop(appid: str, pubfile_id: str, download_dir: st
         workshop_state["message"] = f"Internal Error: {str(e)}"
         logger.error(f"Workshop download error: {e}")
 
+@validated_ids
 def StartWorkshopDownloadParams(appid: int, pubfile_id: int, contentScriptQuery: str = "") -> str:
     global workshop_state
 
@@ -733,18 +734,22 @@ def RestartSteam(contentScriptQuery: str = "") -> str:
     return json.dumps({"success": False, "error": "Failed to restart Steam"})
 
 
+@validated_ids
 def HasLuaToolsForApp(appid: int, contentScriptQuery: str = "") -> str:
     return has_luatools_for_app(appid)
 
 
+@validated_ids
 def StartAddViaLuaTools(appid: int, contentScriptQuery: str = "") -> str:
     return start_add_via_luatools(appid)
 
 
+@validated_ids
 def GetAddViaLuaToolsStatus(appid: int, contentScriptQuery: str = "") -> str:
     return get_add_status(appid)
 
 
+@validated_ids
 def CancelAddViaLuaTools(appid: int, contentScriptQuery: str = "") -> str:
     return cancel_add_via_luatools(appid)
 
@@ -761,26 +766,32 @@ def DismissLoadedApps(contentScriptQuery: str = "") -> str:
     return dismiss_loaded_apps()
 
 
+@validated_ids
 def DeleteLuaToolsForApp(appid: int, contentScriptQuery: str = "") -> str:
     return delete_luatools_for_app(appid)
 
 
+@validated_ids
 def CheckForFixes(appid: int, contentScriptQuery: str = "") -> str:
     return check_for_fixes(appid)
 
 
+@validated_ids
 def ApplyGameFix(appid: int, downloadUrl: str, installPath: str, fixType: str = "", gameName: str = "", contentScriptQuery: str = "") -> str:
     return apply_game_fix(appid, downloadUrl, installPath, fixType, gameName)
 
 
+@validated_ids
 def GetApplyFixStatus(appid: int, contentScriptQuery: str = "") -> str:
     return get_apply_fix_status(appid)
 
 
+@validated_ids
 def CancelApplyFix(appid: int, contentScriptQuery: str = "") -> str:
     return cancel_apply_fix(appid)
 
 # --- ATUALIZAÇÃO DA FUNÇÃO UNFIX (COMBINADA) ---
+@validated_ids
 def UnFixGame(appid: int, installPath: str = "", fixDate: str = "", contentScriptQuery: str = "") -> str:
     # 1. Remove Token
     RemoveGameToken(appid)
@@ -789,9 +800,11 @@ def UnFixGame(appid: int, installPath: str = "", fixDate: str = "", contentScrip
     # 3. Limpa arquivos
     return unfix_game(appid, installPath, fixDate)
 
+@validated_ids
 def GetUnfixStatus(appid: int, contentScriptQuery: str = "") -> str:
     return get_unfix_status(appid)
 
+@validated_ids
 def ApplyLinuxNativeFix(appid: int, installPath: str, contentScriptQuery: str = "") -> str:
     return apply_linux_native_fix(installPath)
 
@@ -803,6 +816,7 @@ def GetInstalledLuaScripts(contentScriptQuery: str = "") -> str:
     return get_installed_lua_scripts()
 
 
+@validated_ids
 def GetGameInstallPath(appid: int, contentScriptQuery: str = "") -> str:
     result = get_game_install_path_response(appid)
     return json.dumps(result)
@@ -985,6 +999,7 @@ class Plugin:
 
         # ... (no final do arquivo main.py, antes de "class Plugin:") ...
 
+@validated_ids
 def GetProtonDBStatus(appid: int, contentScriptQuery: str = "") -> str:
     """Busca o status do ProtonDB direto pelo Python (sem CORS, sem Proxy)."""
     try:
@@ -1008,6 +1023,7 @@ def GetProtonDBStatus(appid: int, contentScriptQuery: str = "") -> str:
 #  GERENCIAMENTO DE DLCS (Atomic Write)
 # ==========================================
 
+@validated_ids
 def _fetch_dlc_list(appid: int):
     """Busca a lista de DLCs e seus nomes na Steam."""
     try:
@@ -1043,7 +1059,7 @@ def _fetch_dlc_list(appid: int):
                     if names_data and d_id_str in names_data and names_data[d_id_str]['success']:
                         name = names_data[d_id_str]['data']['name']
 
-                    name = name.replace('"', '').replace("'", "")
+                    name = str(name)
                     dlc_info.append((d_id, name))
             except:
                 for d_id in chunk:
@@ -1055,6 +1071,7 @@ def _fetch_dlc_list(appid: int):
         logger.error(f"[LuaTools] Erro ao buscar DLCs: {e}")
         return []
 
+@validated_ids
 def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
@@ -1078,7 +1095,7 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
         new_block = []
         new_block.append(f"  {appid}:\n")
         for d_id, d_name in dlcs:
-            new_block.append(f"    {d_id}: \"{d_name}\"\n")
+            new_block.append(f"    {validate_id(d_id)}: {json.dumps(str(d_name), ensure_ascii=False)}\n")
 
         new_lines = []
         inserted = False
@@ -1098,10 +1115,7 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
             pass
 
         # Escrita Atômica
-        tmp_path = config_path + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.writelines(new_lines)
-        os.replace(tmp_path, config_path)
+        atomic_write_text(config_path, "".join(new_lines))
 
         return json.dumps({"success": True, "message": f"{len(dlcs)} DLCs successfully added!"})
 
@@ -1109,6 +1123,7 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
         logger.error(f"[LuaTools] Add DLC Error: {e}")
         return json.dumps({"success": False, "error": str(e)})
 
+@validated_ids
 def RemoveGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
@@ -1141,16 +1156,14 @@ def RemoveGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
                 new_lines.append(line)
 
         # Escrita Atômica
-        tmp_path = config_path + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.writelines(new_lines)
-        os.replace(tmp_path, config_path)
+        atomic_write_text(config_path, "".join(new_lines))
 
         return json.dumps({"success": True, "message": "DLCs removidas do config."})
 
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
 
+@validated_ids
 def CheckGameDLCsStatus(appid: int, contentScriptQuery: str = "") -> str:
     """Verifica se as DLCs já estão no config."""
     try:
@@ -1171,6 +1184,7 @@ def CheckGameDLCsStatus(appid: int, contentScriptQuery: str = "") -> str:
         return json.dumps({"success": True, "exists": False})
 
 
+@validated_ids
 def CheckGameUpdate(appid: int, contentScriptQuery: str = "") -> str:
     """Verifica atualização comparando o manifesto local (.depot) com a API SteamCMD."""
     try:
@@ -1269,6 +1283,7 @@ def GetSLSPlayStatus(contentScriptQuery: str = "") -> str:
         return json.dumps({"success": False, "error": str(e)})
 import os
 
+@validated_ids
 def SetSLSPlayStatus(enabled: bool, contentScriptQuery: str = "") -> str:
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
@@ -1298,12 +1313,7 @@ def SetSLSPlayStatus(enabled: bool, contentScriptQuery: str = "") -> str:
             new_lines.append(f"PlayNotOwnedGames: {new_val}\n")
 
         # 3. ESCRITA ATÔMICA: Escreve num arquivo temporário primeiro
-        tmp_path = config_path + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as f:
-            f.writelines(new_lines)
-
-        # 4. Substitui o arquivo original instantaneamente (o SLSsteam só vê o arquivo quando estiver pronto)
-        os.replace(tmp_path, config_path)
+        atomic_write_text(config_path, "".join(new_lines))
 
         return json.dumps({"success": True})
     except Exception as e:
@@ -1314,6 +1324,7 @@ def SetSLSPlayStatus(enabled: bool, contentScriptQuery: str = "") -> str:
 #  FULL UNINSTALL LOGIC (Apaga a pasta toda, ACF e AdditionalApps)
 # ==========================================
 
+@validated_ids
 def _remove_from_additional_apps(appid: int):
     """Limpa o ID do jogo da lista AdditionalApps do config.yaml do SLS"""
     try:
@@ -1343,15 +1354,13 @@ def _remove_from_additional_apps(appid: int):
 
         # Se encontrou e removeu algo, salva usando escrita atômica (sem spamar notificações)
         if modified:
-            tmp_path = config_path + ".tmp"
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                f.writelines(new_lines)
-            os.replace(tmp_path, config_path)
+            atomic_write_text(config_path, "".join(new_lines))
 
     except Exception as e:
         logger.warn(f"[LuaTools] Erro limpando AdditionalApps: {e}")
 
 
+@validated_ids
 def UninstallGameFull(appid: int, contentScriptQuery: str = "") -> str:
     try:
         # 1. Pega o caminho de instalação do jogo

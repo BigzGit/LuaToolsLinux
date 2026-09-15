@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import re
+from urllib.parse import urlsplit, urlunsplit
 
 
 class _StandaloneLogger:
@@ -24,6 +26,30 @@ class _StandaloneLogger:
         self.log(message)
 
 
+def redact_message(message):
+    def redact_url(match):
+        try:
+            parts = urlsplit(match.group(0))
+            host = parts.netloc.rsplit('@', 1)[-1]
+            return urlunsplit((parts.scheme, host, parts.path, '[redacted]' if parts.query else '', ''))
+        except ValueError:
+            return '[redacted URL]'
+    text = re.sub(r"https?://[^\s<>\"']+", redact_url, str(message))
+    return re.sub(r'(?i)(api_key|access_token|authorization|session|cookie)([=:]\s*)[^\s,;]+',
+                  r'\1\2[redacted]', text)
+
+
+class _RedactingLogger:
+    def __init__(self, target):
+        self.target = target
+
+    def __getattr__(self, name):
+        method = getattr(self.target, name)
+        if name in {'log', 'warn', 'error', 'info', 'debug'}:
+            return lambda message: method(redact_message(message))
+        return method
+
+
 _LOGGER_INSTANCE = None
 
 
@@ -40,6 +66,7 @@ def get_logger():
     except ModuleNotFoundError:
         _LOGGER_INSTANCE = _StandaloneLogger()
 
+    _LOGGER_INSTANCE = _RedactingLogger(_LOGGER_INSTANCE)
     return _LOGGER_INSTANCE
 
 

@@ -7,6 +7,13 @@ import httpx  # type: ignore
 from config import HTTP_TIMEOUT_SECONDS
 from logger import logger
 
+def _reject_tls_downgrade(response):
+    if response.is_redirect and response.url.scheme == 'https':
+        location = response.headers.get('location')
+        if location and response.url.join(location).scheme != 'https':
+            raise ValueError('Refusing HTTPS redirect to insecure transport')
+
+
 _HTTP_CLIENT: Optional[httpx.Client] = None
 
 
@@ -17,7 +24,7 @@ def ensure_http_client(context: str = "") -> httpx.Client:
         prefix = f"{context}: " if context else ""
         logger.log(f"{prefix}Initializing shared HTTPX client...")
         try:
-            _HTTP_CLIENT = httpx.Client(timeout=HTTP_TIMEOUT_SECONDS)
+            _HTTP_CLIENT = httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, event_hooks={"response": [_reject_tls_downgrade]})
             logger.log(f"{prefix}HTTPX client initialized")
         except Exception as exc:
             logger.error(f"{prefix}Failed to initialize HTTPX client: {exc}")

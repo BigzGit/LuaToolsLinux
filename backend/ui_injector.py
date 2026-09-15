@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from bridge_auth import get_bridge_token
 
 
 MARKER_START = "<!-- LuaToolsLinux Inject START -->"
@@ -44,6 +45,8 @@ def _inject_index(index_html: str, script_tag: str) -> bool:
     with open(index_html, "r", encoding="utf-8", errors="ignore") as f:
         html = f.read()
 
+    # The inline bridge credential must not be readable by other local users.
+    os.chmod(index_html, os.stat(index_html).st_mode & ~0o077)
     snippet = f"\n{MARKER_START}\n{script_tag}\n{MARKER_END}\n"
 
     if MARKER_START in html and MARKER_END in html:
@@ -77,6 +80,8 @@ def _build_inline_script_tag(script_path: str) -> str | None:
     except Exception:
         return None
 
+    install_root = os.path.dirname(os.path.dirname(script_path))
+    script_content = script_content.replace('__LUATOOLS_BRIDGE_TOKEN__', get_bridge_token(install_root))
     script_content = script_content.replace("</script>", "<\\/script>")
     return f"<script>\n{script_content}\n</script>"
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from typing import Any, Dict, List
+from urllib.parse import urlsplit
 
 from config import (
     API_JSON_FILE,
@@ -148,8 +149,17 @@ def fetch_free_apis_now(content_script_query: str = "") -> str:
         return json.dumps({"success": False, "error": str(exc)})
 
 
+def _is_secure_api(api: Dict[str, Any]) -> bool:
+    """Only HTTPS providers are usable; plaintext providers are skipped."""
+    try:
+        url = str(api.get("url", ""))
+        return urlsplit(url).scheme.lower() == "https"
+    except (ValueError, AttributeError):
+        return False
+
+
 def load_api_manifest() -> List[Dict[str, Any]]:
-    """Return the list of enabled APIs from api.json."""
+    """Return the list of enabled, HTTPS-only APIs from api.json."""
     path = backend_path(API_JSON_FILE)
     text = read_text(path)
     normalized = normalize_manifest_text(text)
@@ -164,8 +174,19 @@ def load_api_manifest() -> List[Dict[str, Any]]:
     try:
         data = json.loads(text or "{}")
         apis = data.get("api_list", [])
-        return [api for api in apis if api.get("enabled", False)]
     except Exception as exc:
         logger.error(f"LuaTools: Failed to parse api.json: {exc}")
         return []
+
+    secure_apis = []
+    for api in apis:
+        if not isinstance(api, dict) or not api.get("enabled", False):
+            continue
+        if not _is_secure_api(api):
+            logger.warn(
+                f"LuaTools: Skipping provider '{api.get('name', 'Unknown')}' because it is not HTTPS"
+            )
+            continue
+        secure_apis.append(api)
+    return secure_apis
 
