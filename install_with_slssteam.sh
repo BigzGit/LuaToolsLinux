@@ -52,6 +52,9 @@ PYZIP
 }
 
 main() {
+    if [[ "${EUID}" -eq 0 && "${LUATOOLS_ALLOW_ROOT:-}" != "1" ]]; then
+        fail "Do not run this installer as root. Run it as your normal user."
+    fi
     require_cmd curl
     require_cmd python3
 

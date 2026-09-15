@@ -107,7 +107,7 @@ run_remote_script() {
         rm -f -- "$script"
         fail "SHA-256 mismatch for ${url}; refusing to execute"
     fi
-    bash "$script" "$@" || rc=$?
+    bash -s -- "$@" < "$script" || rc=$?
     rm -f -- "$script"
     return "$rc"
 }
@@ -1457,6 +1457,9 @@ interactive_menu() {
 
 # ---------- Main ----------
 main() {
+    if [[ "${EUID}" -eq 0 && "${LUATOOLS_ALLOW_ROOT:-}" != "1" ]]; then
+        fail "Do not run this installer as root. Run it as your normal user; it will request sudo when needed. (Override: LUATOOLS_ALLOW_ROOT=1)"
+    fi
     for arg in "$@"; do
         if [[ "$arg" == "--debug" ]]; then
             DEBUG=true
