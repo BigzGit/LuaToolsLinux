@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SELF_REPO_BASE="https://raw.githubusercontent.com/Star123451/LuaToolsLinux/main"
+REPO_OWNER="${LUATOOLS_REPO_OWNER:-BigzGit}"
+REPO_NAME="${LUATOOLS_REPO_NAME:-LuaToolsLinux}"
+REPO_BRANCH="${LUATOOLS_REPO_BRANCH:-main}"
+SELF_REPO_BASE="${LUATOOLS_REPO_RAW:-https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}}"
 LUATOOLS_LEGACY_URL="$SELF_REPO_BASE/update_legacy.sh"
 ENTERTHEWIRED_REPO="https://github.com/ciscosweater/enter-the-wired.git"
 LEGACY_ACCELA_REPO="https://raw.githubusercontent.com/aglairdev/enter-the-wired/main/enter-the-wired"
 ACCELA_FIX_REPO="https://github.com/Cybercountry/ACCELA_FIX.git"
 
-REPO_OWNER="Star123451"
-REPO_NAME="LuaToolsLinux"
 RELEASE_ASSET_NAME="ltsteamplugin.zip"
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 PLUGIN_NAME="luatools"
@@ -32,11 +33,23 @@ debug() { $DEBUG && echo -e "${CYAN}[DEBUG]${NC} $*"; }
 require_cmd() { command -v "$1" >/dev/null 2>&1 || fail "Missing required command: $1"; }
 
 # SHA-256 pins for third-party installer scripts (see dependencies.lock.json).
+# The embedded map keeps the installer self-sufficient when the lockfile cannot
+# be fetched. Keep it in sync with dependencies.lock.json.
 LUATOOLS_LOCK_FILE=""
+LUATOOLS_LOCK_TMP=""
+declare -A EMBEDDED_REMOTE_HASHES=(
+    ["https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/fix-deps"]="96d5b6c62fe516cecdb44e3ed5c04a33beab1b7f7301008415a416fe9fbdc741"
+    ["https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/enter-the-wired"]="46dd3a0eeea37635966fc227018f602242923feee43c002b9f45d4140eb215c7"
+    ["https://raw.githubusercontent.com/ciscosweater/enter-the-wired/3cba346164cbb232da60dffe56f132cbeb13bcf6/uninstall"]="bf14271b8bd61d0c11ecbbade3361199ffb0e30428c3f1474d1055e188341f4e"
+    ["https://steambrew.app/install.sh"]="8996fbc98d6b5bd15776c46c8dd0c26e5cfa13bbcff2d0613ac6719109441a27"
+    ["https://headcrab.pages.dev"]="d2dfac7b5d7b5f6fe99917bb948fe7c2e1392aeb78414fc31094170a593da3cb"
+    ["https://github.com/Cybercountry/ACCELA_FIX/archive/refs/heads/main.tar.gz"]="4f46c82d4c6744d5a1ab9b9adf2e46e7064c0540df48820890ac56fbe8df8a2d"
+)
 
 lookup_remote_hash() {
-    [[ -n "$LUATOOLS_LOCK_FILE" && -f "$LUATOOLS_LOCK_FILE" ]] || { printf '%s' ""; return 0; }
-    python3 - "$LUATOOLS_LOCK_FILE" "$1" <<'PYLOCK'
+    local url="$1" value=""
+    if [[ -n "$LUATOOLS_LOCK_FILE" && -f "$LUATOOLS_LOCK_FILE" ]]; then
+        value="$(python3 - "$LUATOOLS_LOCK_FILE" "$url" <<'PYLOCK'
 import json
 import sys
 try:
@@ -47,6 +60,12 @@ try:
 except Exception:
     print('')
 PYLOCK
+)"
+    fi
+    if [[ -z "$value" ]]; then
+        value="${EMBEDDED_REMOTE_HASHES[$url]:-}"
+    fi
+    printf '%s' "$value"
 }
 
 verify_sha256() {
@@ -160,19 +179,29 @@ cleanup_install() {
     if [[ -n "$LUATOOLS_RELEASE_TMP" ]]; then
         rm -rf -- "$LUATOOLS_RELEASE_TMP"
     fi
-    if [[ -n "$LUATOOLS_LOCK_FILE" ]]; then
-        rm -f -- "$LUATOOLS_LOCK_FILE"
+    if [[ -n "$LUATOOLS_LOCK_TMP" ]]; then
+        rm -f -- "$LUATOOLS_LOCK_TMP"
     fi
     reenable_readonly
 }
 trap cleanup_install EXIT
 
-# Fetch the SHA-256 pin list used to verify remote installer scripts.
+# Locate the SHA-256 pin list used to verify remote installer scripts.
 load_dependency_lock() {
+    local candidate script_dir
+    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-}")" 2>/dev/null && pwd || true)"
+    for candidate in "${script_dir:-}/dependencies.lock.json" "$PWD/dependencies.lock.json"; do
+        if [[ -n "$candidate" && -f "$candidate" ]]; then
+            LUATOOLS_LOCK_FILE="$candidate"
+            return 0
+        fi
+    done
+
     local lock_tmp
     lock_tmp="$(mktemp)" || return 0
     if curl --proto '=https' --proto-redir '=https' -fsSL "$SELF_REPO_BASE/dependencies.lock.json" -o "$lock_tmp" 2>/dev/null; then
         LUATOOLS_LOCK_FILE="$lock_tmp"
+        LUATOOLS_LOCK_TMP="$lock_tmp"
     else
         rm -f -- "$lock_tmp"
     fi
@@ -265,32 +294,39 @@ install_plugin_from_release() {
     tmp_dir="$(mktemp -d)"
     LUATOOLS_RELEASE_TMP="$tmp_dir"
     local meta_file="$tmp_dir/release.json"
-    if ! curl --proto '=https' --proto-redir '=https' -fsSL "$GITHUB_API_URL" -o "$meta_file"; then
-        fail "Failed to fetch latest release metadata"
+    local latest_tag="" asset_url="" asset_digest=""
+    if curl --proto '=https' --proto-redir '=https' -fsSL "$GITHUB_API_URL" -o "$meta_file" 2>/dev/null; then
+        latest_tag=$(jq -r '.tag_name // empty' "$meta_file" 2>/dev/null || true)
+        asset_url=$(jq -r --arg name "$RELEASE_ASSET_NAME" '.assets[] | select(.name==$name) | .browser_download_url' "$meta_file" 2>/dev/null || true)
+        asset_digest=$(jq -r --arg name "$RELEASE_ASSET_NAME" '.assets[] | select(.name==$name) | .digest // empty' "$meta_file" 2>/dev/null || true)
+    else
+        warn "Could not fetch release metadata for ${REPO_OWNER}/${REPO_NAME}."
     fi
-    local latest_tag asset_url
-    latest_tag=$(jq -r '.tag_name' "$meta_file")
-    asset_url=$(jq -r --arg name "$RELEASE_ASSET_NAME" '.assets[] | select(.name==$name) | .browser_download_url' "$meta_file")
+
+    local source_fallback=0
     if [[ -z "$asset_url" || "$asset_url" == "null" ]]; then
-        fail "Release asset '$RELEASE_ASSET_NAME' not found"
+        warn "No release asset '$RELEASE_ASSET_NAME' found; falling back to the repository source archive."
+        source_fallback=1
+        asset_url="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/zip/refs/heads/${REPO_BRANCH}"
     fi
-    info "Latest release: ${latest_tag:-unknown}"
+    info "Latest release: ${latest_tag:-none (source archive)}"
     local zip_file="$tmp_dir/$RELEASE_ASSET_NAME"
-    info "Downloading $RELEASE_ASSET_NAME ..."
+    info "Downloading plugin archive ..."
     if ! curl --proto '=https' --proto-redir '=https' -fL "$asset_url" -o "$zip_file"; then
         fail "Download failed"
     fi
-    local asset_digest expected_digest actual_digest
-    asset_digest=$(jq -r --arg name "$RELEASE_ASSET_NAME" '.assets[] | select(.name==$name) | .digest // empty' "$meta_file")
-    if [[ -n "$asset_digest" ]]; then
-        expected_digest="${asset_digest#sha256:}"
-        actual_digest="$(sha256sum "$zip_file" | awk '{print $1}')"
-        if [[ "$actual_digest" != "$expected_digest" ]]; then
-            fail "Checksum mismatch for release asset '$RELEASE_ASSET_NAME'; refusing to install"
+    if [[ "$source_fallback" -eq 0 ]]; then
+        if [[ -n "$asset_digest" ]]; then
+            local expected_digest="${asset_digest#sha256:}"
+            local actual_digest
+            actual_digest="$(sha256sum "$zip_file" | awk '{print $1}')"
+            if [[ "$actual_digest" != "$expected_digest" ]]; then
+                fail "Checksum mismatch for release asset '$RELEASE_ASSET_NAME'; refusing to install"
+            fi
+            ok "Release asset digest verified"
+        else
+            warn "Release metadata did not expose a digest; plugin archive integrity is unverified."
         fi
-        ok "Release asset digest verified"
-    else
-        warn "Release metadata did not expose a digest; plugin archive integrity is unverified."
     fi
     local millennium_dir=""
     local candidates=(
@@ -317,10 +353,30 @@ install_plugin_from_release() {
         rm -rf "$install_dir"
     fi
     mkdir -p "$install_dir"
-    if ! extract_zip "$zip_file" "$install_dir"; then
+    local extract_dir="$tmp_dir/extract"
+    mkdir -p "$extract_dir"
+    if ! extract_zip "$zip_file" "$extract_dir"; then
         fail "Extraction failed"
     fi
-    ok "Plugin installed (version ${latest_tag:-latest})"
+    # A release zip has plugin.json at its root; a source archive nests it one level down.
+    local plugin_root="$extract_dir"
+    if [[ ! -f "$plugin_root/plugin.json" ]]; then
+        local found_root
+        found_root="$(find "$extract_dir" -maxdepth 2 -name plugin.json -type f -printf '%h\n' 2>/dev/null | head -n 1)"
+        if [[ -n "$found_root" ]]; then
+            plugin_root="$found_root"
+        fi
+    fi
+    if [[ ! -f "$plugin_root/plugin.json" ]]; then
+        fail "plugin.json not found in the downloaded archive"
+    fi
+    local entry
+    for entry in plugin.json backend public requirements.txt requirements.lock README.md; do
+        if [[ -e "$plugin_root/$entry" ]]; then
+            cp -r -- "$plugin_root/$entry" "$install_dir"/
+        fi
+    done
+    ok "Plugin installed (version ${latest_tag:-source})"
 }
 
 # ---------- Python dependencies ----------

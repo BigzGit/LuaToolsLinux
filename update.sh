@@ -6,8 +6,10 @@ set -euo pipefail
 #  By StarWarsK & geovanygrdt
 # ============================================
 
-REPO_OWNER="Star123451"
-REPO_NAME="LuaToolsLinux"
+REPO_OWNER="${LUATOOLS_REPO_OWNER:-BigzGit}"
+REPO_NAME="${LUATOOLS_REPO_NAME:-LuaToolsLinux}"
+REPO_BRANCH="${LUATOOLS_REPO_BRANCH:-main}"
+SOURCE_ARCHIVE_URL="https://codeload.github.com/${REPO_OWNER}/${REPO_NAME}/zip/refs/heads/${REPO_BRANCH}"
 RELEASE_ASSET_NAME="ltsteamplugin.zip"
 GITHUB_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest"
 PLUGIN_NAME="luatools"
@@ -112,12 +114,9 @@ trap cleanup EXIT
 RELEASE_META_FILE="$TMP_DIR/release.json"
 RELEASE_ARCHIVE_FILE="$TMP_DIR/$RELEASE_ASSET_NAME"
 
-if ! curl --proto '=https' --proto-redir '=https' -fsSL "$GITHUB_API_URL" -o "$RELEASE_META_FILE"; then
-    fail "Failed to fetch latest release metadata"
-fi
-
-mapfile -t RELEASE_INFO < <(
-    python3 - "$RELEASE_META_FILE" "$RELEASE_ASSET_NAME" <<'PY'
+if curl --proto '=https' --proto-redir '=https' -fsSL "$GITHUB_API_URL" -o "$RELEASE_META_FILE" 2>/dev/null; then
+    mapfile -t RELEASE_INFO < <(
+        python3 - "$RELEASE_META_FILE" "$RELEASE_ASSET_NAME" <<'PY'
 import json
 import sys
 
@@ -141,33 +140,41 @@ print(tag)
 print(asset_url)
 print(asset_digest)
 PY
-)
+    )
+    LATEST_TAG="${RELEASE_INFO[0]:-}"
+    ASSET_URL="${RELEASE_INFO[1]:-}"
+    ASSET_DIGEST="${RELEASE_INFO[2]:-}"
+else
+    warn "Could not fetch release metadata for ${REPO_OWNER}/${REPO_NAME}."
+    LATEST_TAG=""
+    ASSET_URL=""
+    ASSET_DIGEST=""
+fi
 
-LATEST_TAG="${RELEASE_INFO[0]:-}"
-ASSET_URL="${RELEASE_INFO[1]:-}"
-ASSET_DIGEST="${RELEASE_INFO[2]:-}"
-
+SOURCE_FALLBACK=0
 if [ -z "$ASSET_URL" ]; then
-    fail "Could not find release asset '$RELEASE_ASSET_NAME' in latest release"
+    warn "No release asset '$RELEASE_ASSET_NAME' found; falling back to the repository source archive."
+    SOURCE_FALLBACK=1
+    ASSET_URL="$SOURCE_ARCHIVE_URL"
 fi
 
 if [ -n "$LATEST_TAG" ]; then
     info "Latest release: $LATEST_TAG"
 fi
 
-info "Downloading release asset: $RELEASE_ASSET_NAME"
+info "Downloading plugin archive ..."
 if ! curl --proto '=https' --proto-redir '=https' -fL "$ASSET_URL" -o "$RELEASE_ARCHIVE_FILE"; then
     fail "Failed to download release asset"
 fi
 
-if [ -n "$ASSET_DIGEST" ]; then
+if [ "$SOURCE_FALLBACK" -eq 0 ] && [ -n "$ASSET_DIGEST" ]; then
     EXPECTED_DIGEST="${ASSET_DIGEST#sha256:}"
     ACTUAL_DIGEST="$(sha256sum "$RELEASE_ARCHIVE_FILE" | awk '{print $1}')"
     if [ "$ACTUAL_DIGEST" != "$EXPECTED_DIGEST" ]; then
         fail "Checksum mismatch for release asset; refusing to install"
     fi
     ok "Release asset digest verified"
-else
+elif [ "$SOURCE_FALLBACK" -eq 0 ]; then
     warn "Release metadata did not expose a digest; archive integrity is unverified."
 fi
 
@@ -179,8 +186,10 @@ if [ -d "$INSTALL_DIR" ]; then
 fi
 
 mkdir -p "$INSTALL_DIR"
+EXTRACT_DIR="$TMP_DIR/extract"
+mkdir -p "$EXTRACT_DIR"
 
-if ! extract_zip "$RELEASE_ARCHIVE_FILE" "$INSTALL_DIR"; then
+if ! extract_zip "$RELEASE_ARCHIVE_FILE" "$EXTRACT_DIR"; then
     rm -rf "$INSTALL_DIR"
     if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
         mv "$BACKUP_DIR" "$INSTALL_DIR"
@@ -188,6 +197,25 @@ if ! extract_zip "$RELEASE_ARCHIVE_FILE" "$INSTALL_DIR"; then
     fi
     fail "Failed to extract release archive (install aborted)"
 fi
+
+# A release zip has plugin.json at its root; a source archive nests it one level down.
+PLUGIN_ROOT="$EXTRACT_DIR"
+if [ ! -f "$PLUGIN_ROOT/plugin.json" ]; then
+    PLUGIN_ROOT="$(find "$EXTRACT_DIR" -maxdepth 2 -name plugin.json -type f -printf '%h\n' 2>/dev/null | head -n 1)"
+fi
+if [ -z "$PLUGIN_ROOT" ] || [ ! -f "$PLUGIN_ROOT/plugin.json" ]; then
+    rm -rf "$INSTALL_DIR"
+    if [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ]; then
+        mv "$BACKUP_DIR" "$INSTALL_DIR"
+    fi
+    fail "plugin.json not found in the downloaded archive"
+fi
+
+for entry in plugin.json backend public requirements.txt requirements.lock README.md; do
+    if [ -e "$PLUGIN_ROOT/$entry" ]; then
+        cp -r -- "$PLUGIN_ROOT/$entry" "$INSTALL_DIR"/
+    fi
+done
 
 ok "Installed latest release successfully"
 

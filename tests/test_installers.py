@@ -68,6 +68,22 @@ generate() {
                 self.assertEqual(result.returncode,0,result.stderr)
             self.assertIn('\\;',Path(d,'bin/luatools').read_text())
 
+    def test_embedded_hashes_match_lockfile(self):
+        import json
+        lock = json.loads((ROOT / 'dependencies.lock.json').read_text())['resources']
+        source = (ROOT / 'install.sh').read_text()
+        start = source.index('declare -A EMBEDDED_REMOTE_HASHES=(')
+        end = source.index('\n}', source.index('lookup_remote_hash() {')) + 2
+        block = source[start:end]
+        for url, meta in lock.items():
+            with self.subTest(url=url):
+                result = subprocess.run(
+                    ['bash', '-s', url], input=block + '\nlookup_remote_hash "$1"\n',
+                    text=True, capture_output=True,
+                    env=dict(os.environ, LUATOOLS_LOCK_FILE=''),
+                )
+                self.assertEqual(result.stdout.strip(), meta['sha256'])
+
     def test_remote_script_hash_verification_is_enforced(self):
         import hashlib
         import json
