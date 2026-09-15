@@ -80,6 +80,9 @@ main() {
     cp -r "$extracted/backend" "$INSTALL_ROOT/backend"
     cp -r "$extracted/public" "$INSTALL_ROOT/public"
     cp "$extracted/requirements.txt" "$INSTALL_ROOT/requirements.txt"
+    if [[ -f "$extracted/requirements.lock" ]]; then
+        cp "$extracted/requirements.lock" "$INSTALL_ROOT/requirements.lock"
+    fi
     cp "$extracted/README.md" "$INSTALL_ROOT/README.md"
 
     info "Installing Python dependencies"
@@ -90,11 +93,28 @@ main() {
         warn "Could not create a local virtualenv; falling back to user-site pip install."
     fi
 
-    if ! "$python_bin" -m pip install -r "$INSTALL_ROOT/requirements.txt" >/dev/null 2>&1; then
+    # Prefer the hash-pinned lockfile; fall back to pinned requirements only if
+    # hash verification is unavailable.
+    local requirements_arg="$INSTALL_ROOT/requirements.txt"
+    local hash_args=()
+    if [[ -f "$INSTALL_ROOT/requirements.lock" ]]; then
+        requirements_arg="$INSTALL_ROOT/requirements.lock"
+        hash_args=(--require-hashes)
+    fi
+
+    if ! "$python_bin" -m pip install "${hash_args[@]}" -r "$requirements_arg" >/dev/null 2>&1; then
         if [[ "$python_bin" != "python3" ]]; then
             warn "Virtualenv pip install failed; retrying with user-site pip."
-            if ! python3 -m pip install --user -r "$INSTALL_ROOT/requirements.txt" >/dev/null 2>&1; then
-                fail "Python dependency install failed"
+            if ! python3 -m pip install --user "${hash_args[@]}" -r "$requirements_arg" >/dev/null 2>&1; then
+                if [[ ${#hash_args[@]} -gt 0 ]]; then
+                    warn "Hash-verified install failed; retrying pinned requirements without hashes."
+                    requirements_arg="$INSTALL_ROOT/requirements.txt"
+                    if ! python3 -m pip install --user -r "$requirements_arg" >/dev/null 2>&1; then
+                        fail "Python dependency install failed"
+                    fi
+                else
+                    fail "Python dependency install failed"
+                fi
             fi
             python_bin="python3"
         else
