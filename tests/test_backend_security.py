@@ -90,6 +90,25 @@ class BackendSecurityTests(unittest.TestCase):
             self.assertEqual(trap.read_text(),'safe')
             self.assertIn('# keep comment',config.read_text())
 
+    def test_unlock_dlc_subscribes_additional_apps(self):
+        with tempfile.TemporaryDirectory() as d:
+            config=Path(d,'config.yaml'); config.write_text('AdditionalApps:\n\nDlcData:\n')
+            with patch.object(main.os.path,'expanduser',return_value=str(config)), \
+                 patch.object(main,'check_slssteam_installed',return_value=True), \
+                 patch.object(main,'slssteam_injection_status',return_value={'installed':True,'injected':True,'error':None,'launchers':[]}), \
+                 patch.object(main,'_fetch_dlc_list',return_value=[(1149640,'Royalty'),(3022790,'Odyssey')]):
+                self.assertTrue(json.loads(main.AddGameDLCs(294100))['success'])
+                self.assertTrue(json.loads(main.CheckGameDLCsStatus(294100))['exists'])
+                from ruamel.yaml import YAML
+                data=YAML(typ='safe').load(config.read_text())
+                self.assertEqual(data['AdditionalApps'],[1149640,3022790])
+                self.assertEqual(sorted(data['DlcData'][294100].keys()),[1149640,3022790])
+                self.assertTrue(json.loads(main.RemoveGameDLCs(294100))['success'])
+                data=YAML(typ='safe').load(config.read_text())
+                self.assertFalse(data.get('AdditionalApps'))
+                self.assertFalse(data.get('DlcData'))
+                self.assertFalse(json.loads(main.CheckGameDLCsStatus(294100))['exists'])
+
     def test_unfix_malicious_and_legacy_logs(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d,'game');root.mkdir(); outside=Path(d,'outside');outside.write_text('keep')

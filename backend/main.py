@@ -1078,6 +1078,140 @@ def _fetch_dlc_list(appid: int):
         logger.error(f"[LuaTools] Erro ao buscar DLCs: {e}")
         return []
 
+
+def _dlcdata_ids_for_app(lines, appid):
+    """Return the DLC AppIds registered under DlcData for *appid*."""
+    ids = []
+    in_dlc_data = False
+    in_target = False
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if stripped.startswith("DlcData:"):
+            in_dlc_data = True
+            in_target = False
+            continue
+        if not in_dlc_data:
+            continue
+        if stripped and indent == 0:
+            break
+        if indent == 2 and stripped.startswith(f"{appid}:"):
+            in_target = True
+            continue
+        if in_target:
+            if stripped and indent <= 2:
+                in_target = False
+                continue
+            if indent >= 4 and ":" in stripped:
+                key = stripped.split(":", 1)[0].strip()
+                if key.isdigit():
+                    ids.append(int(key))
+    return ids
+
+
+def _ensure_dlcdata_block(lines, appid, dlcs):
+    """Add the DlcData entry for *appid* when missing. Returns (lines, added)."""
+    if _dlcdata_ids_for_app(lines, appid):
+        return lines, False
+
+    block = [f"  {appid}:\n"]
+    for d_id, d_name in dlcs:
+        block.append(f"    {validate_id(d_id)}: {json.dumps(str(d_name), ensure_ascii=False)}\n")
+
+    new_lines = []
+    has_tag = False
+    for line in lines:
+        new_lines.append(line)
+        if line.strip().startswith("DlcData:"):
+            has_tag = True
+            new_lines.extend(block)
+    if not has_tag:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.append("\nDlcData:\n")
+        new_lines.extend(block)
+    return new_lines, True
+
+
+def _remove_dlcdata_block(lines, appid):
+    """Remove the DlcData entry for *appid* and its nested DLC ids."""
+    new_lines = []
+    in_target = False
+    target = f"{appid}:"
+    for line in lines:
+        stripped = line.strip()
+        indent = len(line) - len(line.lstrip())
+        if indent == 2 and stripped.startswith(target):
+            in_target = True
+            continue
+        if in_target:
+            if stripped and indent <= 2:
+                in_target = False
+                new_lines.append(line)
+            else:
+                continue
+        else:
+            new_lines.append(line)
+    return new_lines
+
+
+def _additional_apps_ids(lines):
+    """Return the AppIds currently listed under AdditionalApps."""
+    ids = []
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("AdditionalApps:"):
+            in_section = True
+            continue
+        if in_section:
+            if stripped and not line[:1].isspace():
+                break
+            if stripped.startswith("-"):
+                value = stripped[1:].strip()
+                if value.isdigit():
+                    ids.append(int(value))
+    return ids
+
+
+def _ensure_additional_apps(lines, ids):
+    """Subscribe *ids* through AdditionalApps. Returns (lines, added)."""
+    existing = set(_additional_apps_ids(lines))
+    missing = [i for i in dict.fromkeys(ids) if i not in existing]
+    header_idx = next((idx for idx, line in enumerate(lines)
+                       if line.strip().startswith("AdditionalApps:")), None)
+    if not missing and header_idx is not None:
+        return lines, False
+
+    new_lines = list(lines)
+    if header_idx is None:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] += "\n"
+        new_lines.append("AdditionalApps:\n")
+        new_lines.extend(f"  - {i}\n" for i in missing)
+    else:
+        new_lines = (new_lines[:header_idx + 1]
+                     + [f"  - {i}\n" for i in missing]
+                     + new_lines[header_idx + 1:])
+    return new_lines, bool(missing)
+
+
+def _remove_additional_apps(lines, ids):
+    """Remove *ids* from the AdditionalApps list. Returns (lines, removed)."""
+    remove = {str(i) for i in ids}
+    if not remove:
+        return lines, False
+    out = []
+    removed = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("-") and stripped[1:].strip() in remove:
+            removed = True
+            continue
+        out.append(line)
+    return out, removed
+
+
 @validated_ids
 def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
     try:
@@ -1100,41 +1234,18 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
         with open(config_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
-        in_dlc_data = False
-        for line in lines:
-            if line.strip().startswith("DlcData:"):
-                in_dlc_data = True
-            if in_dlc_data and line.strip().startswith(f"{appid}:"):
-                return json.dumps({"success": True, "injected": injected,
-                                   "message": "As DLCs já estão configuradas!"})
+        # DlcData only matters for games with more than 64 DLC.
+        lines, dlc_data_added = _ensure_dlcdata_block(lines, appid, dlcs)
+        # AdditionalApps subscribes the DLC AppIds, which is what makes the
+        # Steam client treat them as owned (DLC tab + download).
+        dlc_ids = [int(d_id) for d_id, _ in dlcs]
+        lines, additional_added = _ensure_additional_apps(lines, dlc_ids)
 
-        new_block = []
-        new_block.append(f"  {appid}:\n")
-        for d_id, d_name in dlcs:
-            new_block.append(f"    {validate_id(d_id)}: {json.dumps(str(d_name), ensure_ascii=False)}\n")
-
-        new_lines = []
-        inserted = False
-        has_tag = False
-
-        for line in lines:
-            new_lines.append(line)
-            if line.strip().startswith("DlcData:"):
-                has_tag = True
-                new_lines.extend(new_block)
-                inserted = True
-
-        if not has_tag:
-            new_lines.append("\nDlcData:\n")
-            new_lines.extend(new_block)
-        elif has_tag and not inserted:
-            pass
-
-        # Escrita Atômica
-        atomic_write_text(config_path, "".join(new_lines))
+        atomic_write_text(config_path, "".join(lines))
 
         result = {"success": True, "injected": injected,
-                  "message": f"{len(dlcs)} DLCs successfully added!"}
+                  "message": f"{len(dlcs)} DLCs successfully added!",
+                  "dlcData": dlc_data_added, "additionalApps": additional_added}
         if not injected:
             result["warning"] = ("SLSsteam não está injetado no Steam. "
                                  "Use 'Repair Injection' e reinicie o Steam.")
@@ -1143,6 +1254,7 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
     except Exception as e:
         logger.error(f"[LuaTools] Add DLC Error: {e}")
         return json.dumps({"success": False, "error": str(e)})
+
 
 @validated_ids
 def RemoveGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
@@ -1153,55 +1265,38 @@ def RemoveGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
         with open(config_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
-        new_lines = []
-        in_target_block = False
-        target_str = f"{appid}:"
-        found = False
-
-        for line in lines:
-            stripped = line.strip()
-
-            if stripped.startswith(target_str):
-                in_target_block = True
-                found = True
-                continue
-
-            if in_target_block:
-                indent = len(line) - len(line.lstrip())
-                if indent <= 2 and stripped:
-                    in_target_block = False
-                    new_lines.append(line)
-                else:
-                    continue
-            else:
-                new_lines.append(line)
+        dlc_ids = _dlcdata_ids_for_app(lines, appid)
+        lines = _remove_dlcdata_block(lines, appid)
+        lines, _ = _remove_additional_apps(lines, dlc_ids)
 
         # Escrita Atômica
-        atomic_write_text(config_path, "".join(new_lines))
+        atomic_write_text(config_path, "".join(lines))
 
         return json.dumps({"success": True, "message": "DLCs removidas do config."})
 
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
 
+
 @validated_ids
 def CheckGameDLCsStatus(appid: int, contentScriptQuery: str = "") -> str:
-    """Verifica se as DLCs já estão no config."""
+    """Verifica se as DLCs já estão configuradas para download."""
     try:
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
         if not os.path.exists(config_path):
             return json.dumps({"success": True, "exists": False})
 
         with open(config_path, 'r', encoding='utf-8') as f:
-            content = f.read()
+            lines = f.readlines()
 
-        # Verificação simples: se "  APPID:" está no arquivo.
-        # Pode dar falso positivo se o número aparecer em outro lugar, mas com a indentação é seguro.
-        if f"\n  {appid}:" in content or f"  {appid}:" in content: # Tenta achar com quebra de linha antes
-             return json.dumps({"success": True, "exists": True})
+        dlc_ids = _dlcdata_ids_for_app(lines, appid)
+        if not dlc_ids:
+            return json.dumps({"success": True, "exists": False})
 
-        return json.dumps({"success": True, "exists": False})
-    except:
+        subscribed = set(_additional_apps_ids(lines))
+        exists = all(dlc_id in subscribed for dlc_id in dlc_ids)
+        return json.dumps({"success": True, "exists": exists})
+    except Exception:
         return json.dumps({"success": True, "exists": False})
 
 
