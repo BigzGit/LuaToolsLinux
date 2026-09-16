@@ -150,6 +150,34 @@ def open_directory(path: str) -> None:
 # SLSsteam injection verification
 # ---------------------------------------------------------------------------
 
+SLSSTEAM_INJECTION_MARKER = "# LuaToolsLinux SLSsteam injection"
+
+# Installed Steam launchers source the client. They are separate from the
+# Steam data directory returned by find_steam_root() (which holds stplug-in,
+# depotcache, ...). On Debian the launcher lives at ~/.steam/steam.sh.
+_STEAM_LAUNCHER_CANDIDATES = [
+    os.path.expanduser("~/.steam/steam.sh"),
+    os.path.expanduser("~/.steam/root/steam.sh"),
+    os.path.expanduser("~/.steam/steam/steam.sh"),
+    os.path.expanduser("~/.local/share/Steam/steam.sh"),
+    os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steam.sh"),
+]
+
+
+def find_steam_launchers() -> list[str]:
+    """Return existing Steam launcher scripts (deduplicated by real path)."""
+    launchers: list[str] = []
+    seen: set[str] = set()
+    for candidate in _STEAM_LAUNCHER_CANDIDATES:
+        if not os.path.isfile(candidate):
+            continue
+        resolved = os.path.realpath(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        launchers.append(candidate)
+    return launchers
+
 
 def _get_ld_audit_line() -> str:
     """Build the LD_AUDIT export line using the detected SLSsteam install dir."""
@@ -157,47 +185,103 @@ def _get_ld_audit_line() -> str:
     return 'export LD_AUDIT=' + shlex.quote(f'{sls_dir}/library-inject.so:{sls_dir}/SLSsteam.so')
 
 
-def verify_slssteam_injected() -> dict:
-    """Check that steam.sh has the LD_AUDIT export and patch it if missing.
+def _inject_ld_audit(content: str) -> str | None:
+    """Return *content* with the LD_AUDIT export inserted, or None if no anchor."""
+    line = _get_ld_audit_line()
+    block = f"{SLSSTEAM_INJECTION_MARKER}\n{line}\n\n"
+    # Insert right before Steam actually launches the client so only the client
+    # process tree (not the shell helpers) inherits the audit library.
+    for anchor in ("# and launch steam", '"$STEAMROOT/$STEAMEXEPATH"'):
+        index = content.find(anchor)
+        if index != -1:
+            return content[:index] + block + content[index:]
+    return None
 
-    Returns a dict:  {"patched": bool, "already_ok": bool, "error": str|None}
-    Matches the SLSsteam installer's ``patch_steam_sh()`` logic.
+
+def _is_slssteam_injected(content: str) -> bool:
+    return "LD_AUDIT" in content and "SLSsteam" in content
+
+
+def slssteam_injection_status() -> dict:
+    """Read-only check of the SLSsteam LD_AUDIT injection in the Steam launchers.
+
+    Returns a dict::
+
+        {"installed": bool, "injected": bool, "error": str|None,
+         "launchers": [str, ...]}
     """
     if not check_slssteam_installed():
-        return {"patched": False, "already_ok": False, "error": "SLSsteam not installed"}
+        return {"installed": False, "injected": False,
+                "error": "SLSsteam not installed", "launchers": []}
 
-    # Find steam.sh
-    steam_sh = None
-    for candidate in _STEAM_PATHS:
-        path = os.path.join(candidate, "steam.sh")
-        if os.path.isfile(path):
-            steam_sh = path
-            break
+    launchers = find_steam_launchers()
+    if not launchers:
+        return {"installed": True, "injected": False,
+                "error": "steam.sh not found", "launchers": []}
 
-    if not steam_sh:
-        return {"patched": False, "already_ok": False, "error": "steam.sh not found"}
+    injected = False
+    errors: list[str] = []
+    for steam_sh in launchers:
+        try:
+            with open(steam_sh, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as exc:
+            errors.append(f"{steam_sh}: read failed: {exc}")
+            continue
+        if _is_slssteam_injected(content):
+            injected = True
 
-    try:
-        with open(steam_sh, "r", encoding="utf-8") as f:
-            content = f.read()
-    except Exception as exc:
-        return {"patched": False, "already_ok": False, "error": f"read failed: {exc}"}
+    return {"installed": True, "injected": injected,
+            "error": "; ".join(errors) if errors else None,
+            "launchers": launchers}
 
-    # Already patched?
-    if "LD_AUDIT" in content and "SLSsteam" in content:
-        return {"patched": False, "already_ok": True, "error": None}
 
-    # Patch: insert the export at line 10 (matching SLSsteam installer)
-    try:
-        ld_audit_line = _get_ld_audit_line()
-        lines = content.splitlines(keepends=True)
-        insert_pos = min(9, len(lines))  # line 10 (0-indexed = 9)
-        lines.insert(insert_pos, ld_audit_line + "\n")
-        with open(steam_sh, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-        return {"patched": True, "already_ok": False, "error": None}
-    except Exception as exc:
-        return {"patched": False, "already_ok": False, "error": f"write failed: {exc}"}
+def verify_slssteam_injected() -> dict:
+    """Patch every Steam launcher so SLSsteam is loaded via LD_AUDIT.
+
+    Write action used by the repair flow. Returns a dict::
+
+        {"patched": bool, "already_ok": bool, "error": str|None,
+         "launchers": [str, ...]}
+    """
+    status = slssteam_injection_status()
+    if not status["installed"]:
+        return {"patched": False, "already_ok": False,
+                "error": "SLSsteam not installed", "launchers": []}
+    if not status["launchers"]:
+        return {"patched": False, "already_ok": False,
+                "error": "steam.sh not found", "launchers": []}
+
+    patched = False
+    already_ok = False
+    errors: list[str] = []
+    for steam_sh in status["launchers"]:
+        try:
+            with open(steam_sh, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as exc:
+            errors.append(f"{steam_sh}: read failed: {exc}")
+            continue
+
+        if _is_slssteam_injected(content):
+            already_ok = True
+            continue
+
+        injected = _inject_ld_audit(content)
+        if injected is None:
+            errors.append(f"{steam_sh}: unsupported launcher layout")
+            continue
+
+        try:
+            with open(steam_sh, "w", encoding="utf-8") as f:
+                f.write(injected)
+            patched = True
+        except Exception as exc:
+            errors.append(f"{steam_sh}: write failed: {exc}")
+
+    return {"patched": patched, "already_ok": already_ok,
+            "error": "; ".join(errors) if errors else None,
+            "launchers": status["launchers"]}
 
 
 def get_platform_summary() -> dict:
@@ -209,7 +293,7 @@ def get_platform_summary() -> dict:
         "accela_dir": get_accela_dir(),
     }
     if summary["slssteam_installed"]:
-        inj = verify_slssteam_injected()
-        summary["slssteam_injection"] = inj
+        status = slssteam_injection_status()
+        summary["slssteam_injection"] = status
     return summary
 

@@ -2592,6 +2592,68 @@
             group.appendChild(labelInfo);
             group.appendChild(toggleWrap);
             sectionEl.appendChild(group);
+
+            // --- SLSsteam injection status / repair ---
+            const statusRow = document.createElement('div');
+            statusRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,0.2);padding:15px;border-radius:10px;margin-top:12px;gap:12px;';
+
+            const statusInfo = document.createElement('div');
+            statusInfo.innerHTML = '<div style="font-weight:600;color:#fff;">' + t('sls.injection.title', 'SLSsteam Injection') + '</div><div class="lt-sls-injection-status" style="font-size:12px;color:#a9b2c3;">' + t('sls.injection.loading', 'Checking...') + '</div>';
+
+            const repairBtn = document.createElement('a');
+            repairBtn.className = 'btnv6_blue_hoverfade btn_small';
+            repairBtn.href = '#';
+            repairBtn.innerHTML = '<span>' + t('sls.injection.repair', 'Repair') + '</span>';
+
+            function refreshSLSStatus() {
+                const statusEl = statusInfo.querySelector('.lt-sls-injection-status');
+                if (statusEl) statusEl.textContent = t('sls.injection.loading', 'Checking...');
+                Millennium.callServerMethod('luatools', 'GetSLSsteamStatus', { contentScriptQuery: '' }).then(function(res){
+                    try {
+                        const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                        const el = statusInfo.querySelector('.lt-sls-injection-status');
+                        if (!el) return;
+                        if (!payload || !payload.success) {
+                            el.textContent = (payload && payload.error) ? payload.error : t('sls.injection.error', 'Unavailable');
+                            el.style.color = '#ff8080';
+                        } else if (!payload.installed) {
+                            el.textContent = t('sls.injection.notInstalled', 'SLSsteam not installed');
+                            el.style.color = '#ff8080';
+                        } else if (payload.injected) {
+                            el.textContent = t('sls.injection.ok', 'Injected — restart Steam to apply');
+                            el.style.color = '#79c754';
+                        } else {
+                            el.textContent = t('sls.injection.missing', 'Not injected into steam.sh');
+                            el.style.color = '#ff8080';
+                        }
+                    } catch (err) {}
+                }).catch(function(){
+                    const el = statusInfo.querySelector('.lt-sls-injection-status');
+                    if (el) { el.textContent = t('sls.injection.error', 'Unavailable'); el.style.color = '#ff8080'; }
+                });
+            }
+
+            repairBtn.onclick = function(e) {
+                e.preventDefault();
+                repairBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+                Millennium.callServerMethod('luatools', 'RepairSLSsteamInjection', { contentScriptQuery: '' }).then(function(res){
+                    try {
+                        const payload = typeof res === 'string' ? JSON.parse(res) : res;
+                        ShowLuaToolsAlert('SLSsteam', (payload && (payload.message || payload.error)) || 'Done');
+                    } catch (_) {}
+                }).catch(function(err){
+                    ShowLuaToolsAlert('SLSsteam', err);
+                }).finally(function(){
+                    repairBtn.innerHTML = '<span>' + t('sls.injection.repair', 'Repair') + '</span>';
+                    refreshSLSStatus();
+                });
+            };
+
+            statusRow.appendChild(statusInfo);
+            statusRow.appendChild(repairBtn);
+            sectionEl.appendChild(statusRow);
+            refreshSLSStatus();
+
             contentWrap.appendChild(sectionEl);
         }
         // --- NEW FUNCTION: Render Launcher Section ---

@@ -27,6 +27,8 @@ class BackendSecurityTests(unittest.TestCase):
             with self.assertRaises(ValueError): bridge._call_backend(name, {})
         self.assertIn('StartWorkshopDownloadParams', bridge.RPC_METHODS)
         self.assertIn('Logger.log', bridge.RPC_METHODS)
+        self.assertIn('GetSLSsteamStatus', bridge.RPC_METHODS)
+        self.assertIn('RepairSLSsteamInjection', bridge.RPC_METHODS)
         self.assertEqual(bridge._call_backend('GetPluginDir', {}), main.get_plugin_dir())
 
     def request(self, body, token='t'*64, origin='https://steamloopback.host', host='127.0.0.1:38495', length=None, content_type='application/json'):
@@ -75,7 +77,9 @@ class BackendSecurityTests(unittest.TestCase):
             config=Path(d,'config.yaml'); config.write_text('# keep comment\nDlcData:\n')
             trap=Path(d,'outside');trap.write_text('safe')
             Path(str(config)+'.tmp').symlink_to(trap)
-            with patch.object(main.os.path,'expanduser',return_value=str(config)):
+            with patch.object(main.os.path,'expanduser',return_value=str(config)), \
+                 patch.object(main,'check_slssteam_installed',return_value=True), \
+                 patch.object(main,'slssteam_injection_status',return_value={'installed':True,'injected':True,'error':None,'launchers':[]}):
                 self.assertTrue(json.loads(main.AddFakeAppId('480'))['success'])
                 with patch.object(main,'_fetch_dlc_list',return_value=[(123,'A "name"\nInjected: yes\\')]):
                     self.assertTrue(json.loads(main.AddGameDLCs(481))['success'])

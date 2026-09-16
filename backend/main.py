@@ -16,6 +16,13 @@ from security import atomic_write_text, validated_ids, validate_id
 from typing import Any
 
 from platform_bridge import Millennium
+from linux_platform import (
+    check_slssteam_installed,
+    get_slssteam_config_path,
+    get_slssteam_install_dir,
+    slssteam_injection_status,
+    verify_slssteam_injected,
+)
 
 from api_manifest import (
     fetch_free_apis_now as api_fetch_free_apis_now,
@@ -1074,6 +1081,14 @@ def _fetch_dlc_list(appid: int):
 @validated_ids
 def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
     try:
+        if not check_slssteam_installed():
+            return json.dumps({
+                "success": False,
+                "error": "SLSsteam não está instalado. Instale o SLSsteam antes de desbloquear DLCs.",
+            })
+        injection = slssteam_injection_status()
+        injected = bool(injection.get("injected"))
+
         config_path = os.path.expanduser("~/.config/SLSsteam/config.yaml")
         if not os.path.exists(config_path):
             return json.dumps({"success": False, "error": "Config não encontrada. Instale o SLSsteam primeiro."})
@@ -1090,7 +1105,8 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
             if line.strip().startswith("DlcData:"):
                 in_dlc_data = True
             if in_dlc_data and line.strip().startswith(f"{appid}:"):
-                return json.dumps({"success": True, "message": "As DLCs já estão configuradas!"})
+                return json.dumps({"success": True, "injected": injected,
+                                   "message": "As DLCs já estão configuradas!"})
 
         new_block = []
         new_block.append(f"  {appid}:\n")
@@ -1117,7 +1133,12 @@ def AddGameDLCs(appid: int, contentScriptQuery: str = "") -> str:
         # Escrita Atômica
         atomic_write_text(config_path, "".join(new_lines))
 
-        return json.dumps({"success": True, "message": f"{len(dlcs)} DLCs successfully added!"})
+        result = {"success": True, "injected": injected,
+                  "message": f"{len(dlcs)} DLCs successfully added!"}
+        if not injected:
+            result["warning"] = ("SLSsteam não está injetado no Steam. "
+                                 "Use 'Repair Injection' e reinicie o Steam.")
+        return json.dumps(result)
 
     except Exception as e:
         logger.error(f"[LuaTools] Add DLC Error: {e}")
@@ -1282,6 +1303,46 @@ def GetSLSPlayStatus(contentScriptQuery: str = "") -> str:
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
 import os
+
+def GetSLSsteamStatus(contentScriptQuery: str = "") -> str:
+    """Report whether SLSsteam is installed and injected into the Steam launcher."""
+    try:
+        installed = check_slssteam_installed()
+        status = {
+            "success": True,
+            "installed": installed,
+            "installDir": get_slssteam_install_dir(),
+            "configPath": get_slssteam_config_path(),
+            "configExists": os.path.isfile(get_slssteam_config_path()),
+        }
+        if installed:
+            status["injection"] = slssteam_injection_status()
+            status["injected"] = bool(status["injection"].get("injected"))
+        else:
+            status["injected"] = False
+            status["injection"] = {
+                "installed": False, "injected": False,
+                "error": "SLSsteam not installed", "launchers": [],
+            }
+        return json.dumps(status)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
+
+
+def RepairSLSsteamInjection(contentScriptQuery: str = "") -> str:
+    """Patch the Steam launcher so SLSsteam is loaded via LD_AUDIT."""
+    try:
+        result = verify_slssteam_injected()
+        ok = bool(result.get("already_ok") or result.get("patched"))
+        if not check_slssteam_installed():
+            message = "SLSsteam is not installed."
+        elif ok:
+            message = "SLSsteam injection is active."
+        else:
+            message = result.get("error") or "Could not inject SLSsteam."
+        return json.dumps({"success": ok, "message": message, **result})
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)})
 
 @validated_ids
 def SetSLSPlayStatus(enabled: bool, contentScriptQuery: str = "") -> str:

@@ -40,6 +40,7 @@ MAX_REQUEST_BYTES = 1024 * 1024
 # Explicit allowlist of the methods the LuaTools frontend is known to call.
 # Adding a new public function to main.py does NOT expose it automatically.
 RPC_ALLOWED_METHODS = frozenset({
+    'AddFakeAppId', 'AddGameDLCs', 'AddGameToken',
     'ApplyGameFix', 'ApplyLinuxNativeFix', 'ApplySettingsChanges',
     'BrowseForLauncher', 'CancelAddViaLuaTools', 'CancelApplyFix',
     'CancelWorkshopDownload', 'CheckFakeAppIdStatus', 'CheckForFixes',
@@ -49,10 +50,12 @@ RPC_ALLOWED_METHODS = frozenset({
     'GetGameInstallPath', 'GetGamesDatabase', 'GetIconDataUrl',
     'GetInitApisMessage', 'GetInstalledFixes', 'GetInstalledLuaScripts',
     'GetLauncherPath', 'GetPluginDir', 'GetProtonDBStatus', 'GetSettingsConfig',
-    'GetSLSPlayStatus', 'GetThemes', 'GetTranslations', 'GetUnfixStatus',
+    'GetSLSPlayStatus', 'GetSLSsteamStatus', 'GetThemes', 'GetTranslations', 'GetUnfixStatus',
     'GetWorkshopDownloadStatus', 'GetWorkshopToolPath', 'HasLuaToolsForApp',
     'InstallDependencies', 'Logger.error', 'Logger.log', 'Logger.warn',
-    'OpenExternalUrl', 'OpenGameFolder', 'ReadLoadedApps', 'RestartSteam',
+    'OpenExternalUrl', 'OpenGameFolder', 'ReadLoadedApps',
+    'RemoveFakeAppId', 'RemoveGameDLCs', 'RemoveGameToken',
+    'RepairSLSsteamInjection', 'RestartSteam',
     'SaveLauncherPath', 'SaveRyuuCookie', 'SaveWorkshopToolPath',
     'SetSLSPlayStatus', 'StartAddViaLuaTools', 'StartWorkshopDownloadParams',
     'UnFixGame', 'UninstallGameFull', 'UpdateMorrenusKey',
