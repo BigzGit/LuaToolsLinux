@@ -202,24 +202,103 @@ def _is_slssteam_injected(content: str) -> bool:
     return "LD_AUDIT" in content and "SLSsteam" in content
 
 
+def _get_ld_audit_env() -> str:
+    """LD_AUDIT assignment usable inside a .desktop Exec line."""
+    sls_dir = get_slssteam_install_dir()
+    return f'LD_AUDIT="{sls_dir}/library-inject.so:{sls_dir}/SLSsteam.so"'
+
+
+# Desktop entries used to launch Steam. Patching the user copy survives the
+# Debian launcher rewriting ~/.steam/steam.sh on client updates.
+_STEAM_DESKTOP_SOURCES = [
+    os.path.expanduser("~/.steam/deb-installer/steam.desktop"),
+    "/usr/share/applications/steam.desktop",
+    "/usr/local/share/applications/steam.desktop",
+]
+
+
+def get_user_desktop_path() -> str:
+    """Path of the user override for the Steam application menu entry."""
+    return os.path.expanduser("~/.local/share/applications/steam.desktop")
+
+
+def _inject_desktop_ld_audit(content: str) -> str | None:
+    """Prefix Steam Exec= lines with the LD_AUDIT env, or None if unchanged."""
+    prefix = "env " + _get_ld_audit_env() + " "
+    changed = False
+    out: list[str] = []
+    for line in content.splitlines(keepends=True):
+        body = line.rstrip("\n")
+        stripped = body.lstrip()
+        indent = body[: len(body) - len(stripped)]
+        if stripped.startswith("Exec="):
+            value = stripped[len("Exec="):].strip()
+            if "steam" in value and "LD_AUDIT" not in value:
+                out.append(f"{indent}Exec={prefix}{value}\n")
+                changed = True
+                continue
+        out.append(line)
+    return "".join(out) if changed else None
+
+
+def desktop_override_status() -> bool:
+    """Return True when the user Steam desktop entry sets the LD_AUDIT env."""
+    try:
+        with open(get_user_desktop_path(), "r", encoding="utf-8") as f:
+            return _is_slssteam_injected(f.read())
+    except Exception:
+        return False
+
+
+def _install_desktop_override() -> bool:
+    """Write a user desktop entry that launches Steam with SLSsteam loaded."""
+    injected = None
+    for source in _STEAM_DESKTOP_SOURCES:
+        if not os.path.isfile(source):
+            continue
+        try:
+            with open(source, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            continue
+        if _is_slssteam_injected(content):
+            injected = content
+            break
+        candidate = _inject_desktop_ld_audit(content)
+        if candidate is not None:
+            injected = candidate
+            break
+    if injected is None:
+        return False
+
+    target = get_user_desktop_path()
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.islink(target) or os.path.exists(target):
+            os.remove(target)
+        with open(target, "w", encoding="utf-8") as f:
+            f.write(injected)
+        os.chmod(target, 0o755)
+        return True
+    except Exception:
+        return False
+
+
 def slssteam_injection_status() -> dict:
-    """Read-only check of the SLSsteam LD_AUDIT injection in the Steam launchers.
+    """Read-only check of the SLSsteam LD_AUDIT injection.
 
     Returns a dict::
 
-        {"installed": bool, "injected": bool, "error": str|None,
-         "launchers": [str, ...]}
+        {"installed": bool, "injected": bool, "launcher": bool,
+         "desktop": bool, "error": str|None, "launchers": [str, ...]}
     """
     if not check_slssteam_installed():
-        return {"installed": False, "injected": False,
-                "error": "SLSsteam not installed", "launchers": []}
+        return {"installed": False, "injected": False, "launcher": False,
+                "desktop": False, "error": "SLSsteam not installed",
+                "launchers": []}
 
     launchers = find_steam_launchers()
-    if not launchers:
-        return {"installed": True, "injected": False,
-                "error": "steam.sh not found", "launchers": []}
-
-    injected = False
+    launcher_injected = False
     errors: list[str] = []
     for steam_sh in launchers:
         try:
@@ -229,31 +308,34 @@ def slssteam_injection_status() -> dict:
             errors.append(f"{steam_sh}: read failed: {exc}")
             continue
         if _is_slssteam_injected(content):
-            injected = True
+            launcher_injected = True
 
-    return {"installed": True, "injected": injected,
-            "error": "; ".join(errors) if errors else None,
-            "launchers": launchers}
+    desktop = desktop_override_status()
+    error = "; ".join(errors) if errors else None
+    if not launchers and not desktop and error is None:
+        error = "steam.sh not found"
+
+    return {"installed": True, "injected": launcher_injected or desktop,
+            "launcher": launcher_injected, "desktop": desktop,
+            "error": error, "launchers": launchers}
 
 
 def verify_slssteam_injected() -> dict:
-    """Patch every Steam launcher so SLSsteam is loaded via LD_AUDIT.
+    """Patch the Steam launchers and desktop entry so SLSsteam is loaded.
 
     Write action used by the repair flow. Returns a dict::
 
         {"patched": bool, "already_ok": bool, "error": str|None,
-         "launchers": [str, ...]}
+         "desktop": bool, "launchers": [str, ...]}
     """
     status = slssteam_injection_status()
     if not status["installed"]:
         return {"patched": False, "already_ok": False,
-                "error": "SLSsteam not installed", "launchers": []}
-    if not status["launchers"]:
-        return {"patched": False, "already_ok": False,
-                "error": "steam.sh not found", "launchers": []}
+                "error": "SLSsteam not installed", "desktop": False,
+                "launchers": []}
 
+    already_ok = bool(status["injected"])
     patched = False
-    already_ok = False
     errors: list[str] = []
     for steam_sh in status["launchers"]:
         try:
@@ -264,7 +346,6 @@ def verify_slssteam_injected() -> dict:
             continue
 
         if _is_slssteam_injected(content):
-            already_ok = True
             continue
 
         injected = _inject_ld_audit(content)
@@ -279,9 +360,18 @@ def verify_slssteam_injected() -> dict:
         except Exception as exc:
             errors.append(f"{steam_sh}: write failed: {exc}")
 
+    desktop = status["desktop"]
+    if not desktop:
+        if _install_desktop_override():
+            desktop = True
+            patched = True
+        else:
+            errors.append("steam.desktop override unavailable")
+
     return {"patched": patched, "already_ok": already_ok,
             "error": "; ".join(errors) if errors else None,
-            "launchers": status["launchers"]}
+            "desktop": desktop, "launchers": status["launchers"]}
+
 
 
 def get_platform_summary() -> dict:
