@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_OWNER="Star123451"
-REPO_NAME="LuaToolsLinux"
-BRANCH="main"
+REPO_OWNER="${LUATOOLS_REPO_OWNER:-BigzGit}"
+REPO_NAME="${LUATOOLS_REPO_NAME:-LuaToolsLinux}"
+BRANCH="${LUATOOLS_REPO_BRANCH:-main}"
 
 INSTALL_ROOT="$HOME/.local/share/LuaToolsLinux"
 VENV_DIR="$INSTALL_ROOT/.venv"
@@ -49,6 +49,29 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
                 raise ValueError('Symlink in extraction destination')
     archive.extractall(root)
 PYZIP
+}
+
+install_session_startup() {
+    local autostart_dir="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
+    local startup="$BIN_DIR/luatools-session"
+    local quoted_healer quoted_starter
+    printf -v quoted_healer '%q' "$UI_HEALER"
+    printf -v quoted_starter '%q' "$BRIDGE_STARTER"
+    cat > "$startup" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+$quoted_healer
+exec $quoted_starter
+EOF
+    chmod +x "$startup"
+    mkdir -p "$autostart_dir"
+    python3 - "$autostart_dir/luatools.desktop" "$startup" <<'PYAUTO'
+import sys
+from pathlib import Path
+# Desktop Exec quoting is different from shell quoting.
+command = sys.argv[2].replace('\\', '\\\\').replace('"', '\\"').replace('`', '\\`').replace('$', '\\$').replace('%', '%%')
+Path(sys.argv[1]).write_text('[Desktop Entry]\nType=Application\nName=LuaTools bridge\nExec="' + command + '"\nTerminal=false\n')
+PYAUTO
 }
 
 main() {
@@ -127,7 +150,7 @@ main() {
 
     mkdir -p "$BIN_DIR"
     local quoted_python quoted_cli quoted_bridge quoted_injector quoted_root
-    printf -v quoted_python '%q' "$VENV_DIR/bin/python"
+    printf -v quoted_python '%q' "${python_bin:-$VENV_DIR/bin/python}"
     printf -v quoted_cli '%q' "$INSTALL_ROOT/backend/standalone_cli.py"
     printf -v quoted_bridge '%q' "$INSTALL_ROOT/backend/web_bridge_server.py"
     printf -v quoted_injector '%q' "$INSTALL_ROOT/backend/ui_injector.py"
@@ -211,6 +234,13 @@ EOF
         fi
     elif [ -n "$ui_output" ]; then
         info "$ui_output"
+    fi
+
+    if command -v systemctl >/dev/null && [[ -f "$INSTALL_ROOT/backend/millennium_bridge.py" ]]; then
+        "$python_bin" "$INSTALL_ROOT/backend/millennium_bridge.py"
+    else
+        install_session_startup
+        "$BRIDGE_STARTER" || fail "LuaTools bridge failed to start"
     fi
 
     info "LuaTools standalone installed"

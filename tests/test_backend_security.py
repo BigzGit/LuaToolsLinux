@@ -128,8 +128,8 @@ class BackendSecurityTests(unittest.TestCase):
             root=Path(d); launcher=root/'ACCELA $literal; name.AppImage';launcher.write_text('fixture')
             archive=root/'480.zip'
             with zipfile.ZipFile(archive,'w') as z:
-                z.writestr('480.lua','setManifestid(1, 2)\naddappid(480)\n')
-                z.writestr('123.manifest',b'manifest')
+                z.writestr('480\\480.lua','setManifestid(1, 2)\naddappid(480)\n')
+                z.writestr('480\\123.manifest',b'manifest')
             process=Mock(returncode=0);process.communicate.return_value=('','')
             with patch.object(downloads,'detect_steam_install_path',return_value=d), patch.object(downloads,'load_launcher_path',return_value=str(launcher)), patch.object(downloads.subprocess,'Popen',return_value=process) as popen:
                 downloads._process_and_install_lua(480,str(archive))

@@ -15,11 +15,14 @@ SCRIPT_TAG = '<script src="LuaTools/luatools.js"></script>'
 
 
 def _candidate_steam_roots() -> list[str]:
-    return [
+    candidates = [
+        os.path.expanduser("~/.steam/root"),
+        os.path.expanduser("~/.steam"),
         os.path.expanduser("~/.steam/steam"),
         os.path.expanduser("~/.local/share/Steam"),
         os.path.expanduser("~/.var/app/com.valvesoftware.Steam/.steam/steam"),
     ]
+    return list(dict.fromkeys(os.path.realpath(path) for path in candidates))
 
 
 def _sync_assets(public_dir: str, target_dir: str) -> None:

@@ -12,6 +12,7 @@ from security import (
     validate_id,
     rooted_path,
     extract_zip,
+    normalize_download_zip,
     trusted_ryuu_url,
     validate_remote_url,
     is_allowed_game_install_path,
@@ -94,6 +95,33 @@ class SecurityTests(unittest.TestCase):
                 with zipfile.ZipFile(buf) as z, self.assertRaises(ValueError):
                     extract_zip(z, d)
                 self.assertFalse(Path(d, 'good.txt').exists())
+
+    def test_windows_zip_names_are_normalized_atomically(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d, 'input.zip')
+            with zipfile.ZipFile(path, 'w') as z:
+                z.writestr('480\\480.lua', 'fixture')
+                z.writestr('480\\123.manifest', b'manifest')
+            normalize_download_zip(path)
+            with zipfile.ZipFile(path) as z:
+                self.assertEqual(z.namelist(), ['480/480.lua', '480/123.manifest'])
+                self.assertEqual(z.read('480/480.lua'), b'fixture')
+            normalized = path.read_bytes()
+            normalize_download_zip(path)
+            self.assertEqual(path.read_bytes(), normalized)
+
+    def test_windows_zip_rejects_traversal_and_collisions_before_rewrite(self):
+        for name in ('480\\..\\outside', '\\outside', 'C:\\outside',
+                     '480/../../outside', '480/ok.lua'):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                path = Path(d, 'input.zip')
+                with zipfile.ZipFile(path, 'w') as z:
+                    z.writestr('480\\ok.lua', 'fixture')
+                    z.writestr(name, 'bad')
+                original = path.read_bytes()
+                with self.assertRaises(ValueError):
+                    normalize_download_zip(path)
+                self.assertEqual(path.read_bytes(), original)
 
     def test_archive_regular_and_symlink(self):
         with tempfile.TemporaryDirectory() as d:

@@ -7,7 +7,7 @@
 Install **Millennium + LuaTools + ACCELA + SLSsteam** automatically with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Star123451/LuaToolsLinux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/BigzGit/LuaToolsLinux/main/install.sh | bash
 ```
 
 ⚠️ **IMPORTANT:** Watch the video tutorial pinned in the Discord channel before configuring everything.
@@ -134,3 +134,21 @@ and offers to install it when needed.
 # License
 
 See the original LuaTools repository for license information.
+
+## Standalone installation on Linux
+
+`bash install_with_slssteam.sh` installs the standalone bridge and enables it
+at desktop login. It uses the same repository defaults as `install.sh`; override
+`LUATOOLS_REPO_OWNER`, `LUATOOLS_REPO_NAME`, or `LUATOOLS_REPO_BRANCH` if needed.
+The UI repair recognizes Debian installations directly under `~/.steam` as well
+as `~/.steam/root`, `~/.steam/steam`, and `~/.local/share/Steam`.
+
+On Millennium 3, the installer registers LuaTools as a frontend plugin backed
+by the local Python bridge. On systemd desktops, `luatools-bridge.service` starts
+at login and restarts automatically after failure. Check it with
+`systemctl --user status luatools-bridge.service` and inspect its logs with
+`journalctl --user -u luatools-bridge.service`. Bridge health is available at
+`http://127.0.0.1:38495/health`. Reopen a Store page after updating the interface.
+
+Sushi archives containing Windows path separators are validated and converted
+to Linux paths before they are passed to ACCELA.

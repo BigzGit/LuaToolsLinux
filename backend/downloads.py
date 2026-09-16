@@ -11,7 +11,7 @@ import time
 import subprocess
 from typing import Dict, Any
 
-from security import trusted_ryuu_url, atomic_write_text, atomic_output, validate_zip
+from security import trusted_ryuu_url, atomic_write_text, atomic_output, normalize_download_zip
 from urllib.parse import quote
 
 from platform_bridge import Millennium
@@ -601,9 +601,8 @@ def _process_and_install_lua(appid: int, zip_path: str) -> None:
     target_dir = os.path.join(base_path or "", "config", "stplug-in")
     os.makedirs(target_dir, exist_ok=True)
 
-    # Reject hostile archive names before handing the file to an external launcher.
-    with zipfile.ZipFile(zip_path) as archive:
-        validate_zip(archive)
+    # Sushi archives use Windows separators. Validate and normalize before any launcher sees them.
+    normalize_download_zip(zip_path)
 
     # --- INTEGRAÇÃO LAUNCHER CUSTOMIZÁVEL ---
     # Carrega o caminho salvo ou usa o padrão

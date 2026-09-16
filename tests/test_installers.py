@@ -10,6 +10,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class InstallerTests(unittest.TestCase):
+    def test_ui_injector_finds_debian_root_once(self):
+        import sys
+        from unittest.mock import patch
+        sys.path.insert(0, str(ROOT / 'backend'))
+        import ui_injector
+        with tempfile.TemporaryDirectory() as d:
+            steam = Path(d, '.steam')
+            (steam / 'steamui').mkdir(parents=True)
+            (steam / 'root').symlink_to(steam, target_is_directory=True)
+            index = steam / 'steamui/index.html'
+            index.write_text('<html><body></body></html>')
+            public = Path(d, 'plugin/public')
+            public.mkdir(parents=True)
+            (public / 'luatools.js').write_text('console.log("test");')
+            with patch.dict(os.environ, HOME=d):
+                stats = ui_injector.ensure_ui_injection(str(public.parent))
+                self.assertEqual(stats['roots_seen'], 1)
+                self.assertEqual(stats['roots_patched'], 1)
+                self.assertEqual(ui_injector.ensure_ui_injection(str(public.parent))['roots_patched'], 0)
+            self.assertIn(ui_injector.MARKER_START, index.read_text())
+
     def test_millennium_checksum_failure_stops_before_changes(self):
         source=(ROOT/'Install-Millenium.sh').read_text().rsplit('main "$@"',1)[0]
         with tempfile.TemporaryDirectory() as d:

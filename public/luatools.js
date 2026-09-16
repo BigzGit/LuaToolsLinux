@@ -2,6 +2,10 @@
 (function() {
     'use strict';
 
+    // Keep the Python bridge private: never replace Millennium's global API.
+    let Millennium = window.Millennium;
+    const bridgeToken = '__LUATOOLS_BRIDGE_TOKEN__';
+
     function escapeHtml(value) {
         return String(value == null ? '' : value).replace(/[&<>"']/g, function(c) {
             return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -11,10 +15,10 @@
     // Fallback RPC bridge so LuaTools UI still works without Millennium.
     (function ensureMillenniumBridge() {
         try {
-            if (typeof window.Millennium !== 'undefined' && typeof window.Millennium.callServerMethod === 'function') {
+            if (!/^[a-f0-9]{64}$/.test(bridgeToken) && Millennium && typeof Millennium.callServerMethod === 'function') {
                 return;
             }
-            window.Millennium = {
+            Millennium = {
                 callServerMethod: function(_plugin, method, args) {
                     const payload = {
                         method: String(method || ''),
@@ -22,7 +26,7 @@
                     };
                     return fetch('http://127.0.0.1:38495/rpc', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'X-LuaTools-Token': '__LUATOOLS_BRIDGE_TOKEN__' },
+                        headers: { 'Content-Type': 'application/json', 'X-LuaTools-Token': bridgeToken },
                         body: JSON.stringify(payload)
                     }).then(function(res) {
                         if (!res || !res.ok) {
@@ -46,7 +50,7 @@
     function backendLog(message) {
         try {
             if (typeof Millennium !== 'undefined' && typeof Millennium.callServerMethod === 'function') {
-                Millennium.callServerMethod('luatools', 'Logger.log', { message: String(message) });
+                Promise.resolve(Millennium.callServerMethod('luatools', 'Logger.log', { message: String(message) })).catch(function() {});
             }
         } catch (err) {
             if (typeof console !== 'undefined' && console.warn) {
@@ -836,9 +840,11 @@
                                 backendLog('LuaTools: GetGameInstallPath error: ' + err);
                                 try { overlay.remove(); } catch(_) {}
                             }
-                        }).catch(function() {
+                        }).catch(function(err) {
                             try { overlay.remove(); } catch(_) {}
-                            const errorText = t('menu.error.getPath', 'Error getting game path');
+                            const errorText = (err && err.message === 'Failed to fetch')
+                                ? 'LuaTools service is unavailable. Please wait a moment and try again.'
+                                : t('menu.error.getPath', 'Error getting game path');
                             ShowLuaToolsAlert('LuaTools', errorText);
                         });
                     } catch(err) {
@@ -4546,6 +4552,12 @@
                                 window.__LuaToolsButtonInserted = true;
                             }
                             window.__LuaToolsPresenceCheckInFlight = false;
+                        }
+                    }).catch(function() {
+                        window.__LuaToolsPresenceCheckInFlight = false;
+                        if (!document.querySelector('.luatools-button')) {
+                            steamdbContainer.appendChild(mainWrapper);
+                            window.__LuaToolsButtonInserted = true;
                         }
                     });
                 } else {

@@ -540,7 +540,13 @@ force_close_steam() {
 
 start_steam() {
     info "Starting Steam..."
-    nohup steam >/dev/null 2>&1 &
+    local steam_bin
+    steam_bin="$(command -v steam || true)"
+    if [[ -z "$steam_bin" && -x /usr/games/steam ]]; then
+        steam_bin=/usr/games/steam
+    fi
+    [[ -n "$steam_bin" ]] || fail "Steam executable not found"
+    nohup "$steam_bin" >/dev/null 2>&1 &
     ok "Steam launched"
 }
 
@@ -551,7 +557,7 @@ detect_steam_type() {
         steam_type="flatpak"
     elif command -v snap >/dev/null && snap list 2>/dev/null | grep -q "^steam "; then
         steam_type="snap"
-    elif command -v steam >/dev/null && [[ -f /usr/bin/steam ]]; then
+    elif command -v steam >/dev/null || [[ -x /usr/games/steam ]]; then
         steam_type="native"
     fi
     echo "$steam_type"
@@ -569,11 +575,11 @@ get_distro() {
 get_distro_family() {
     if [[ -f /etc/os-release ]]; then
         . /etc/os-release
-        if [[ "$ID" == "ubuntu" || "$ID" == "debian" || "$ID_LIKE" =~ (debian|ubuntu) ]]; then
+        if [[ "$ID" == "ubuntu" || "$ID" == "debian" || "${ID_LIKE:-}" =~ (debian|ubuntu) ]]; then
             echo "debian"
-        elif [[ "$ID" == "fedora" || "$ID" == "rhel" || "$ID" == "centos" || "$ID_LIKE" =~ (fedora|rhel) ]]; then
+        elif [[ "$ID" == "fedora" || "$ID" == "rhel" || "$ID" == "centos" || "${ID_LIKE:-}" =~ (fedora|rhel) ]]; then
             echo "fedora"
-        elif [[ "$ID" == "arch" || "$ID_LIKE" =~ arch ]]; then
+        elif [[ "$ID" == "arch" || "${ID_LIKE:-}" =~ arch ]]; then
             echo "arch"
         else
             echo "unknown"
@@ -895,6 +901,9 @@ install_all() {
     install_millennium_beta
     install_plugin_from_release
     check_python_dependencies
+    if [[ -f "$LUATOOLS_INSTALL_DIR/backend/millennium_bridge.py" ]]; then
+        python3 "$LUATOOLS_INSTALL_DIR/backend/millennium_bridge.py"
+    fi
     install_accela_and_slssteam
     start_steam
     show_status
@@ -914,6 +923,9 @@ install_millennium_flow() {
     fi
     install_plugin_from_release
     check_python_dependencies
+    if [[ -f "$LUATOOLS_INSTALL_DIR/backend/millennium_bridge.py" ]]; then
+        python3 "$LUATOOLS_INSTALL_DIR/backend/millennium_bridge.py"
+    fi
     start_steam
     show_status
     if is_accela_installed; then

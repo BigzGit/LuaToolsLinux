@@ -197,6 +197,44 @@ def atomic_write_text(path, text):
         output.write(text)
 
 
+def normalize_download_zip(path):
+    """Convert Windows ZIP separators only after validating every destination.
+
+    Repack atomically so the external launcher and our own reader see identical,
+    safe names. General filesystem path validation remains strict.
+    """
+    import copy
+    import zipfile
+
+    with zipfile.ZipFile(path) as source:
+        entries = []
+        seen = set()
+        changed = False
+        for member in source.infolist():
+            name = member.filename.replace("\\", "/")
+            parts = relative_parts(name)
+            if stat.S_ISLNK(member.external_attr >> 16):
+                raise ValueError('Archive symlinks are not allowed')
+            canonical = '/'.join(parts)
+            if canonical in seen:
+                raise ValueError('Duplicate archive destination')
+            seen.add(canonical)
+            changed |= name != member.filename
+            normalized = copy.copy(member)
+            normalized.filename = name
+            normalized.orig_filename = name
+            entries.append((member, normalized))
+        if not changed:
+            return
+        with atomic_output(path) as output:
+            with zipfile.ZipFile(output, 'w') as destination:
+                destination.comment = source.comment
+                for original, normalized in entries:
+                    with source.open(original) as incoming:
+                        with destination.open(normalized, 'w') as outgoing:
+                            shutil.copyfileobj(incoming, outgoing)
+
+
 def validate_zip(archive):
     for member in archive.infolist():
         relative_parts(member.filename)
